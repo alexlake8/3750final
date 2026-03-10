@@ -1,0 +1,44 @@
+services:
+  - type: web
+    name: battleship-api
+    runtime: node
+    rootDir: backend
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: TEST_MODE
+        value: false
+      - key: TEST_PASSWORD
+        value: clemson-test-2026
+      - key: CORS_ORIGIN
+        fromService:
+          type: static
+          name: battleship-web
+          envVarKey: RENDER_EXTERNAL_URL
+      - key: DATABASE_URL
+        fromDatabase:
+          name: battleship-db
+          property: connectionString
+
+  - type: static
+    name: battleship-web
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: VITE_API_BASE_URL
+        fromService:
+          type: web
+          name: battleship-api
+          envVarKey: RENDER_EXTERNAL_URL
+
+databases:
+  - name: battleship-db
+    plan: free
+    databaseName: battleship
+    user: battleship
