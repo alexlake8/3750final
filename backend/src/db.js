@@ -1,4 +1,21 @@
 const { Pool } = require('pg');
+
+if (!process.env.DATABASE_URL) {
+  throw new Error('DATABASE_URL is required');
+}
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false },
+});
+
+async function initDb() {
+  await pool.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS players (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      display_name TEXT NOT NULL UNIQUE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       total_games INTEGER NOT NULL DEFAULT 0,
       total_wins INTEGER NOT NULL DEFAULT 0,
