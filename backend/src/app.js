@@ -18,9 +18,16 @@ app.use((req, res, next) => {
 });
 
 app.use((req, res, next) => {
-  if (req.method !== 'GET' && req.method !== 'HEAD' && !req.is('application/json')) {
+  const contentType = req.get('Content-Type');
+
+  if (
+    ['POST', 'PUT', 'PATCH'].includes(req.method) &&
+    contentType &&
+    !req.is('application/json')
+  ) {
     return res.status(415).json({ error: 'Content-Type must be application/json' });
   }
+
   next();
 });
 
