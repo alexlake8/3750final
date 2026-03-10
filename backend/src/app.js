@@ -57,8 +57,17 @@ function isPositiveInteger(value) {
   return Number.isInteger(value) && value > 0;
 }
 
-function isUuid(value) {
-  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+function toPositiveInteger(value) {
+  if (typeof value === 'number') {
+    return Number.isInteger(value) && value > 0 ? value : null;
+  }
+
+  if (typeof value === 'string' && value.trim() !== '') {
+    const parsed = Number(value);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  return null;
 }
 
 function validateCoordinates(ships, gridSize) {
@@ -118,7 +127,7 @@ async function getPlayerById(client, playerId) {
 }
 
 async function getStats(client, playerId) {
-  if (!isUuid(playerId)) {
+  if (!isPositiveInteger(playerId)) {
     throw notFound('Player not found');
   }
 
@@ -131,15 +140,12 @@ async function getStats(client, playerId) {
   const totalShots = player.total_moves;
 
   return {
-    player_id: player.id,
-    display_name: player.display_name,
     games_played: player.total_games,
     wins: player.total_wins,
     losses: player.total_losses,
     total_shots: totalShots,
     total_hits: totalHits,
     accuracy: totalShots === 0 ? 0 : Number((totalHits / totalShots).toFixed(3)),
-    created_at: player.created_at,
   };
 }
 
@@ -208,7 +214,7 @@ async function finalizeGameStats(client, gameId, winnerId) {
      SET total_games = total_games + 1,
          total_wins = total_wins + CASE WHEN id = $2 THEN 1 ELSE 0 END,
          total_losses = total_losses + CASE WHEN id <> $2 THEN 1 ELSE 0 END
-     WHERE id = ANY($1::uuid[])`,
+     WHERE id = ANY($1::bigint[])`,
     [playerIds, winnerId]
   );
 }
@@ -235,7 +241,8 @@ app.post('/api/reset', asyncHandler(async (req, res) => {
 
 app.post('/api/players', asyncHandler(async (req, res) => {
   const { username, playerName, displayName, player_id, playerId } = req.body || {};
-  if (player_id || playerId) {
+
+  if (player_id !== undefined || playerId !== undefined) {
     throw badRequest('Client-supplied playerId is not allowed');
   }
 
@@ -249,36 +256,35 @@ app.post('/api/players', asyncHandler(async (req, res) => {
      VALUES ($1)
      ON CONFLICT (display_name)
      DO UPDATE SET display_name = EXCLUDED.display_name
-     RETURNING id, display_name`,
+     RETURNING id`,
     [normalized]
   );
 
-  const playerIdValue = result.rows[0].id;
-  const existing = await pool.query('SELECT created_at FROM players WHERE id = $1', [playerIdValue]);
-
   res.status(201).json({
-    player_id: playerIdValue,
-    username: result.rows[0].display_name,
-    created_at: existing.rows[0].created_at,
+    player_id: result.rows[0].id,
   });
 }));
 
 app.get('/api/players/:id', asyncHandler(async (req, res) => {
-  const stats = await getStats(pool, req.params.id);
+  const playerId = toPositiveInteger(req.params.id);
+  const stats = await getStats(pool, playerId);
   res.json(stats);
 }));
 
 app.get('/api/players/:id/stats', asyncHandler(async (req, res) => {
-  const stats = await getStats(pool, req.params.id);
+  const playerId = toPositiveInteger(req.params.id);
+  const stats = await getStats(pool, playerId);
   res.json(stats);
 }));
 
 app.post('/api/games', asyncHandler(async (req, res) => {
   const { creator_id, grid_size, max_players, is_ai } = req.body || {};
-  if (!creator_id) {
+  const creatorId = toPositiveInteger(creator_id);
+
+  if (creator_id === undefined || creator_id === null) {
     throw badRequest('creator_id is required');
   }
-  if (!isUuid(creator_id)) {
+  if (!creatorId) {
     throw forbidden('Invalid creator_id');
   }
   if (!Number.isInteger(grid_size) || grid_size < 5 || grid_size > 15) {
@@ -291,7 +297,7 @@ app.post('/api/games', asyncHandler(async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const creator = await getPlayerById(client, creator_id);
+    const creator = await getPlayerById(client, creatorId);
     if (!creator) {
       throw forbidden('Invalid creator_id');
     }
@@ -300,13 +306,13 @@ app.post('/api/games', asyncHandler(async (req, res) => {
       `INSERT INTO games (creator_id, grid_size, max_players, status, current_turn_index)
        VALUES ($1, $2, $3, 'waiting', 0)
        RETURNING *`,
-      [creator_id, grid_size, max_players]
+      [creatorId, grid_size, max_players]
     );
 
     await client.query(
       `INSERT INTO game_players (game_id, player_id, turn_order, is_ai)
        VALUES ($1, $2, 0, $3)`,
-      [gameResult.rows[0].id, creator_id, Boolean(is_ai)]
+      [gameResult.rows[0].id, creatorId, Boolean(is_ai)]
     );
 
     await client.query('COMMIT');
@@ -321,18 +327,18 @@ app.post('/api/games', asyncHandler(async (req, res) => {
 }));
 
 app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
-  const gameId = Number(req.params.id);
+  const gameId = toPositiveInteger(req.params.id);
   const { player_id, playerId, username, playerName, is_ai } = req.body || {};
-  const providedPlayerId = player_id || playerId;
+  const providedPlayerId = toPositiveInteger(player_id ?? playerId);
   const normalizedName = String(username || playerName || '').trim();
 
-  if (!Number.isInteger(gameId) || gameId <= 0) {
+  if (!gameId) {
     throw badRequest('Invalid game id');
   }
   if (!normalizedName && !providedPlayerId) {
     throw badRequest('player_id or username is required');
   }
-  if (providedPlayerId && !isUuid(providedPlayerId)) {
+  if ((player_id !== undefined || playerId !== undefined) && !providedPlayerId) {
     throw forbidden('Invalid player_id');
   }
 
@@ -340,6 +346,7 @@ app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
   try {
     await client.query('BEGIN');
     const { game, players } = await getGameWithPlayers(client, gameId);
+
     if (game.status === 'finished') {
       throw forbidden('Game already finished');
     }
@@ -354,7 +361,10 @@ app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
         throw forbidden('Invalid player_id');
       }
     } else {
-      if (!normalizedName) throw badRequest('username is required');
+      if (!normalizedName) {
+        throw badRequest('username is required');
+      }
+
       const playerResult = await client.query(
         `INSERT INTO players (display_name)
          VALUES ($1)
@@ -398,22 +408,24 @@ app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/games/:id', asyncHandler(async (req, res) => {
-  const gameId = Number(req.params.id);
-  if (!Number.isInteger(gameId) || gameId <= 0) {
+  const gameId = toPositiveInteger(req.params.id);
+  if (!gameId) {
     throw badRequest('Invalid game id');
   }
+
   const { game, players } = await getGameWithPlayers(pool, gameId);
   res.json(serializeGame(game, players));
 }));
 
 app.post('/api/games/:id/place', asyncHandler(async (req, res) => {
-  const gameId = Number(req.params.id);
+  const gameId = toPositiveInteger(req.params.id);
   const { player_id, playerId, ships } = req.body || {};
-  const resolvedPlayerId = player_id || playerId;
-  if (!Number.isInteger(gameId) || gameId <= 0) {
+  const resolvedPlayerId = toPositiveInteger(player_id ?? playerId);
+
+  if (!gameId) {
     throw badRequest('Invalid game id');
   }
-  if (!isUuid(resolvedPlayerId)) {
+  if (!resolvedPlayerId) {
     throw forbidden('Invalid player_id');
   }
 
@@ -421,6 +433,7 @@ app.post('/api/games/:id/place', asyncHandler(async (req, res) => {
   try {
     await client.query('BEGIN');
     const { game, players } = await getGameWithPlayers(client, gameId);
+
     if (game.status !== 'waiting') {
       throw forbidden('Ships can only be placed while the game is waiting');
     }
@@ -435,17 +448,16 @@ app.post('/api/games/:id/place', asyncHandler(async (req, res) => {
 
     validateCoordinates(ships, game.grid_size);
 
-    const keys = ships.map((ship) => `${ship.row},${ship.col}`);
     const overlap = await client.query(
-      `SELECT row, col FROM ships WHERE game_id = $1 AND (row, col) IN (
-         SELECT * FROM UNNEST($2::int[], $3::int[])
-       )`,
-      [
-        gameId,
-        ships.map((s) => s.row),
-        ships.map((s) => s.col),
-      ]
+      `SELECT row, col
+       FROM ships
+       WHERE game_id = $1
+         AND (row, col) IN (
+           SELECT * FROM UNNEST($2::int[], $3::int[])
+         )`,
+      [gameId, ships.map((s) => s.row), ships.map((s) => s.col)]
     );
+
     if (overlap.rowCount > 0) {
       throw badRequest('Ships cannot overlap existing ships in this game');
     }
@@ -466,12 +478,9 @@ app.post('/api/games/:id/place', asyncHandler(async (req, res) => {
     );
 
     await client.query('COMMIT');
-    const gameState = await maybeActivateGame(pool, gameId);
-    res.status(201).json({
-      placed: true,
-      player_id: resolvedPlayerId,
-      ships: keys,
-      game: gameState,
+
+    res.status(200).json({
+      status: 'ships_placed',
     });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -482,13 +491,14 @@ app.post('/api/games/:id/place', asyncHandler(async (req, res) => {
 }));
 
 app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
-  const gameId = Number(req.params.id);
+  const gameId = toPositiveInteger(req.params.id);
   const { player_id, playerId, row, col } = req.body || {};
-  const resolvedPlayerId = player_id || playerId;
-  if (!Number.isInteger(gameId) || gameId <= 0) {
+  const resolvedPlayerId = toPositiveInteger(player_id ?? playerId);
+
+  if (!gameId) {
     throw badRequest('Invalid game id');
   }
-  if (!isUuid(resolvedPlayerId)) {
+  if (!resolvedPlayerId) {
     throw forbidden('Invalid player_id');
   }
   if (!Number.isInteger(row) || !Number.isInteger(col)) {
@@ -499,6 +509,7 @@ app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
   try {
     await client.query('BEGIN');
     const { game, players } = await getGameWithPlayers(client, gameId);
+
     if (game.status !== 'active') {
       throw forbidden('Game is not active');
     }
@@ -526,7 +537,10 @@ app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
     }
 
     const shipResult = await client.query(
-      'SELECT * FROM ships WHERE game_id = $1 AND row = $2 AND col = $3 AND destroyed_at IS NULL LIMIT 1',
+      `SELECT *
+       FROM ships
+       WHERE game_id = $1 AND row = $2 AND col = $3 AND destroyed_at IS NULL
+       LIMIT 1`,
       [gameId, row, col]
     );
 
@@ -537,19 +551,25 @@ app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
     if (shipResult.rowCount > 0) {
       result = 'hit';
       hitPlayerId = shipResult.rows[0].player_id;
+
       await client.query(
         'UPDATE ships SET destroyed_at = NOW() WHERE id = $1',
         [shipResult.rows[0].id]
       );
 
       const remainingShips = await client.query(
-        'SELECT COUNT(*)::int AS remaining FROM ships WHERE game_id = $1 AND player_id = $2 AND destroyed_at IS NULL',
+        `SELECT COUNT(*)::int AS remaining
+         FROM ships
+         WHERE game_id = $1 AND player_id = $2 AND destroyed_at IS NULL`,
         [gameId, hitPlayerId]
       );
+
       if (remainingShips.rows[0].remaining === 0) {
         sunkPlayer = hitPlayerId;
         await client.query(
-          'UPDATE game_players SET eliminated_at = NOW() WHERE game_id = $1 AND player_id = $2 AND eliminated_at IS NULL',
+          `UPDATE game_players
+           SET eliminated_at = NOW()
+           WHERE game_id = $1 AND player_id = $2 AND eliminated_at IS NULL`,
           [gameId, hitPlayerId]
         );
       }
@@ -581,12 +601,14 @@ app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
       gameStatus = 'finished';
       winnerId = alivePlayers[0]?.player_id || resolvedPlayerId;
       nextTurn = null;
+
       await client.query(
         `UPDATE games
          SET status = 'finished', winner_id = $2, current_turn_index = 0, finished_at = NOW()
          WHERE id = $1`,
         [gameId, winnerId]
       );
+
       await finalizeGameStats(client, gameId, winnerId);
     } else {
       await client.query(
@@ -599,9 +621,11 @@ app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
 
     await client.query('COMMIT');
 
-    const nextPlayerId = nextTurn === null
-      ? null
-      : updatedPlayers.find((p) => p.turn_order === nextTurn && !p.eliminated_at)?.player_id || null;
+    const nextPlayerId =
+      nextTurn === null
+        ? null
+        : updatedPlayers.find((p) => p.turn_order === nextTurn && !p.eliminated_at)?.player_id ||
+          null;
 
     res.json({
       move_id: moveResult.rows[0].id,
@@ -620,10 +644,11 @@ app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/games/:id/moves', asyncHandler(async (req, res) => {
-  const gameId = Number(req.params.id);
-  if (!Number.isInteger(gameId) || gameId <= 0) {
+  const gameId = toPositiveInteger(req.params.id);
+  if (!gameId) {
     throw badRequest('Invalid game id');
   }
+
   const result = await pool.query(
     `SELECT m.id AS move_id, m.row, m.col, m.result, m.created_at,
             m.player_id, p.display_name,
@@ -653,8 +678,8 @@ app.get('/api/games/:id/moves', asyncHandler(async (req, res) => {
 }));
 
 app.post('/api/test/games/:id/restart', requireTestMode, asyncHandler(async (req, res) => {
-  const gameId = Number(req.params.id);
-  if (!Number.isInteger(gameId) || gameId <= 0) {
+  const gameId = toPositiveInteger(req.params.id);
+  if (!gameId) {
     throw badRequest('Invalid game id');
   }
 
@@ -662,6 +687,7 @@ app.post('/api/test/games/:id/restart', requireTestMode, asyncHandler(async (req
   try {
     await client.query('BEGIN');
     await getGameWithPlayers(client, gameId);
+
     await client.query('DELETE FROM moves WHERE game_id = $1', [gameId]);
     await client.query('DELETE FROM ships WHERE game_id = $1', [gameId]);
     await client.query(
@@ -677,6 +703,7 @@ app.post('/api/test/games/:id/restart', requireTestMode, asyncHandler(async (req
        WHERE id = $1`,
       [gameId]
     );
+
     await client.query('COMMIT');
     res.json({ status: 'restarted', game_id: gameId });
   } catch (error) {
@@ -688,14 +715,14 @@ app.post('/api/test/games/:id/restart', requireTestMode, asyncHandler(async (req
 }));
 
 app.post('/api/test/games/:id/ships', requireTestMode, asyncHandler(async (req, res) => {
-  const gameId = Number(req.params.id);
+  const gameId = toPositiveInteger(req.params.id);
   const { player_id, playerId, ships } = req.body || {};
-  const resolvedPlayerId = player_id || playerId;
+  const resolvedPlayerId = toPositiveInteger(player_id ?? playerId);
 
-  if (!Number.isInteger(gameId) || gameId <= 0) {
+  if (!gameId) {
     throw badRequest('Invalid game id');
   }
-  if (!isUuid(resolvedPlayerId)) {
+  if (!resolvedPlayerId) {
     throw forbidden('Invalid player_id');
   }
 
@@ -704,23 +731,28 @@ app.post('/api/test/games/:id/ships', requireTestMode, asyncHandler(async (req, 
     await client.query('BEGIN');
     const { game, players } = await getGameWithPlayers(client, gameId);
     const membership = players.find((p) => p.player_id === resolvedPlayerId);
+
     if (!membership) {
       throw forbidden('Player is not part of this game');
     }
 
     validateCoordinates(ships, game.grid_size);
-    await client.query('DELETE FROM ships WHERE game_id = $1 AND player_id = $2', [gameId, resolvedPlayerId]);
+
+    await client.query(
+      'DELETE FROM ships WHERE game_id = $1 AND player_id = $2',
+      [gameId, resolvedPlayerId]
+    );
 
     const overlap = await client.query(
-      `SELECT row, col FROM ships WHERE game_id = $1 AND (row, col) IN (
-         SELECT * FROM UNNEST($2::int[], $3::int[])
-       )`,
-      [
-        gameId,
-        ships.map((s) => s.row),
-        ships.map((s) => s.col),
-      ]
+      `SELECT row, col
+       FROM ships
+       WHERE game_id = $1
+         AND (row, col) IN (
+           SELECT * FROM UNNEST($2::int[], $3::int[])
+         )`,
+      [gameId, ships.map((s) => s.row), ships.map((s) => s.col)]
     );
+
     if (overlap.rowCount > 0) {
       throw badRequest('Ships cannot overlap existing ships in this game');
     }
@@ -743,6 +775,7 @@ app.post('/api/test/games/:id/ships', requireTestMode, asyncHandler(async (req, 
 
     await client.query('COMMIT');
     const gameState = await maybeActivateGame(pool, gameId);
+
     res.json({
       status: 'ships_set',
       player_id: resolvedPlayerId,
@@ -757,17 +790,19 @@ app.post('/api/test/games/:id/ships', requireTestMode, asyncHandler(async (req, 
 }));
 
 app.get('/api/test/games/:id/board/:playerId', requireTestMode, asyncHandler(async (req, res) => {
-  const gameId = Number(req.params.id);
-  const { playerId } = req.params;
-  if (!Number.isInteger(gameId) || gameId <= 0) {
+  const gameId = toPositiveInteger(req.params.id);
+  const playerId = toPositiveInteger(req.params.playerId);
+
+  if (!gameId) {
     throw badRequest('Invalid game id');
   }
-  if (!isUuid(playerId)) {
+  if (!playerId) {
     throw forbidden('Invalid player_id');
   }
 
   const { game, players } = await getGameWithPlayers(pool, gameId);
   const membership = players.find((p) => p.player_id === playerId);
+
   if (!membership) {
     throw forbidden('Player is not part of this game');
   }
