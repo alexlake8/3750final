@@ -479,8 +479,11 @@ app.post('/api/games/:id/place', asyncHandler(async (req, res) => {
 
     await client.query('COMMIT');
 
+    const gameState = await maybeActivateGame(pool, gameId);
+
     res.status(200).json({
       status: 'ships_placed',
+      game: gameState,
     });
   } catch (error) {
     await client.query('ROLLBACK');
