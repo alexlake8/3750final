@@ -731,3 +731,12 @@ function canSubmitPlacement() {
 function canClearPlacement() {
   return !placementAlreadySubmitted() && state.placingShips.length > 0;
 }
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
