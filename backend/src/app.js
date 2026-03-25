@@ -360,8 +360,10 @@ app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
     await client.query('BEGIN');
     const { game, players } = await getGameWithPlayers(client, gameId);
 
-    if (game.status === 'finished') {
-      throw conflict('Game already finished');
+    if (game.status !== 'waiting') {
+      throw conflict('Game already started');
+    }
+    
     }
     if (players.length >= game.max_players) {
       throw conflict('Game is full');
