@@ -386,7 +386,7 @@ app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
 
     await client.query('COMMIT');
     const gameState = await maybeActivateGame(pool, gameId);
-    res.status(201).json({
+    res.status(200).json({
       joined: true,
       player_id: player.id,
       username: player.display_name,
