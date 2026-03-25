@@ -193,7 +193,7 @@ function serializeGame(game, players) {
 
 async function maybeActivateGame(client, gameId) {
   const { game, players } = await getGameWithPlayers(client, gameId);
-  const enoughPlayers = players.length >= 2;
+  const enoughPlayers = players.length === game.max_players;
   const allPlaced = players.length > 0 && players.every((p) => p.placement_done);
 
   if (game.status === 'waiting' && enoughPlayers && allPlaced) {
