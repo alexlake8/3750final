@@ -364,7 +364,6 @@ app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
       throw conflict('Game already started');
     }
     
-    }
     if (players.length >= game.max_players) {
       throw conflict('Game is full');
     }
