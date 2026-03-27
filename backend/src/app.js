@@ -411,13 +411,6 @@ app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
     await client.query('BEGIN');
     const { game, players } = await getGameWithPlayers(client, gameId);
 
-    if (game.status !== 'waiting') {
-      throw conflict('Game already started');
-    }
-    if (players.length >= game.max_players) {
-      throw conflict('Game is full');
-    }
-
     const player = await resolvePlayerIdentity(client, req.body || {}, {
       allowCreationFromName: true,
       requireIdentity: true,
@@ -427,6 +420,13 @@ app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
     const alreadyInGame = players.some((p) => p.player_id === player.id);
     if (alreadyInGame) {
       throw badRequest('Player already joined this game');
+    }
+
+    if (game.status !== 'waiting') {
+      throw conflict('Game already started');
+    }
+    if (players.length >= game.max_players) {
+      throw conflict('Game is full');
     }
 
     const nextTurn = players.length;
@@ -556,7 +556,6 @@ app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
     await client.query('BEGIN');
     const { game, players } = await getGameWithPlayers(client, gameId);
 
-    // 🔥 FIX (THIS IS WHAT YOU WERE MISSING)
     if (game.status === 'finished') {
       throw conflict('Game is already finished');
     }
@@ -575,9 +574,6 @@ app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
     if (row < 0 || row >= game.grid_size || col < 0 || col >= game.grid_size) {
       throw badRequest('Shot is out of bounds');
     }
-    if (membership.turn_order !== game.current_turn_index) {
-      throw forbidden('It is not this player\'s turn');
-    }
 
     const targetPlayerId = resolveTargetPlayer(players, resolvedPlayerId, targetPlayerIdParam);
     if (!targetPlayerId) {
@@ -590,6 +586,10 @@ app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
     );
     if (duplicateMove.rowCount > 0) {
       throw conflict('That coordinate has already been fired upon');
+    }
+
+    if (membership.turn_order !== game.current_turn_index) {
+      throw forbidden('It is not this player\'s turn');
     }
 
     const shipResult = await client.query(
@@ -688,13 +688,11 @@ app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
       game_status: gameStatus,
       winner_id: winnerId,
     });
-    } catch (error) {
+  } catch (error) {
     await client.query('ROLLBACK');
-
-    if (error.code === '23505') {
+    if (error.code === '23505' && error.constraint === 'moves_game_id_target_player_id_row_col_key') {
       throw conflict('That coordinate has already been fired upon');
     }
-
     throw error;
   } finally {
     client.release();
