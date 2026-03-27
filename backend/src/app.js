@@ -556,6 +556,11 @@ app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
     await client.query('BEGIN');
     const { game, players } = await getGameWithPlayers(client, gameId);
 
+    // 🔥 FIX (THIS IS WHAT YOU WERE MISSING)
+    if (game.status === 'finished') {
+      throw conflict('Game is already finished');
+    }
+
     if (game.status !== 'active') {
       throw forbidden('Game is not active');
     }
