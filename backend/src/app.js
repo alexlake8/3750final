@@ -715,7 +715,7 @@ app.post('/api/test/games/:id/restart', requireTestMode, asyncHandler(async (req
     await client.query('ROLLBACK');
     throw error;
   } finally {
-    client.release();
+    client.release(); 
   }
 }));
 
