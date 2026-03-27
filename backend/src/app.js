@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const cors = require('cors');
 const { pool } = require('./db');
@@ -39,11 +40,6 @@ const badRequest = (message) => makeError(400, message);
 const forbidden = (message) => makeError(403, message);
 const notFound = (message) => makeError(404, message);
 const conflict = (message) => makeError(409, message);
-const gone = (message) => makeError(410, message);
-
-function isPositiveInteger(value) {
-  return Number.isInteger(value) && value > 0;
-}
 
 function toPositiveInteger(value) {
   if (typeof value === 'number') {
@@ -54,6 +50,16 @@ function toPositiveInteger(value) {
     return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
   }
   return null;
+}
+
+function toUuid(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const normalized = value.trim().toLowerCase();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(normalized)
+    ? normalized
+    : null;
 }
 
 function normalizeName(body = {}) {
@@ -116,39 +122,81 @@ async function getPlayerById(client, playerId) {
   return result.rows[0] || null;
 }
 
-async function getOrCreatePlayer(client, body = {}) {
-  const providedPlayerId = toPositiveInteger(body.player_id ?? body.playerId ?? body.creator_id ?? body.creatorId);
-  const name = normalizeName(body);
-
-  if (providedPlayerId) {
-    const player = await getPlayerById(client, providedPlayerId);
-    if (!player) {
-      throw badRequest('Invalid player_id');
-    }
-    return player;
-  }
-
-  if (!name) {
+async function upsertPlayerByName(client, displayName) {
+  const normalized = String(displayName || '').trim();
+  if (!normalized) {
     return null;
   }
 
-  const result = await client.query(
-    `INSERT INTO players (display_name)
-     VALUES ($1)
-     ON CONFLICT (display_name)
-     DO UPDATE SET display_name = EXCLUDED.display_name
+  const existing = await client.query('SELECT * FROM players WHERE display_name = $1', [normalized]);
+  if (existing.rowCount > 0) {
+    return existing.rows[0];
+  }
+
+  const playerId = crypto.randomUUID();
+  const inserted = await client.query(
+    `INSERT INTO players (id, display_name)
+     VALUES ($1, $2)
      RETURNING *`,
-    [name]
+    [playerId, normalized]
   );
-  return result.rows[0];
+  return inserted.rows[0];
+}
+
+async function resolvePlayerIdentity(client, body = {}, options = {}) {
+  const {
+    allowCreationFromName = true,
+    requireIdentity = true,
+    rejectClientSuppliedPlayerId = false,
+    createErrorMessage = 'player identity is required',
+  } = options;
+
+  const rawPlayerId = body.player_id ?? body.playerId ?? body.creator_id ?? body.creatorId;
+  const rawName = normalizeName(body);
+
+  if (rejectClientSuppliedPlayerId && rawPlayerId !== undefined) {
+    throw badRequest('Client-supplied playerId is not allowed');
+  }
+
+  if (rawPlayerId !== undefined && rawPlayerId !== null && rawPlayerId !== '') {
+    const playerId = toUuid(rawPlayerId);
+    if (!playerId) {
+      throw forbidden('Invalid player_id');
+    }
+
+    const player = await getPlayerById(client, playerId);
+    if (!player) {
+      throw forbidden('Invalid player_id');
+    }
+
+    if (rawName && rawName !== player.display_name) {
+      throw badRequest('player_id does not match provided playerName');
+    }
+
+    return player;
+  }
+
+  if (!rawName) {
+    if (requireIdentity) {
+      throw badRequest(createErrorMessage);
+    }
+    return null;
+  }
+
+  if (!allowCreationFromName) {
+    throw badRequest(createErrorMessage);
+  }
+
+  return upsertPlayerByName(client, rawName);
 }
 
 async function getStats(client, playerId) {
-  if (!isPositiveInteger(playerId)) {
+  const normalizedPlayerId = toUuid(playerId);
+  if (!normalizedPlayerId) {
     throw notFound('Player not found');
   }
 
-  const player = await getPlayerById(client, playerId);
+  const player = await getPlayerById(client, normalizedPlayerId);
   if (!player) {
     throw notFound('Player not found');
   }
@@ -157,6 +205,9 @@ async function getStats(client, playerId) {
   const totalShots = player.total_moves || 0;
 
   return {
+    player_id: player.id,
+    display_name: player.display_name,
+    created_at: player.created_at,
     games_played: player.total_games,
     wins: player.total_wins,
     losses: player.total_losses,
@@ -183,6 +234,7 @@ function serializeGame(game, players) {
     players: players.map((p) => ({
       player_id: p.player_id,
       username: p.display_name,
+      display_name: p.display_name,
       turn_order: p.turn_order,
       placement_done: p.placement_done,
       is_ai: p.is_ai,
@@ -231,12 +283,15 @@ async function finalizeGameStats(client, gameId, winnerId) {
      SET total_games = total_games + 1,
          total_wins = total_wins + CASE WHEN id = $2 THEN 1 ELSE 0 END,
          total_losses = total_losses + CASE WHEN id <> $2 THEN 1 ELSE 0 END
-     WHERE id = ANY($1::bigint[])`,
+     WHERE id = ANY($1::uuid[])`,
     [playerIds, winnerId]
   );
 }
 
 function requireTestMode(req, res, next) {
+  if (!TEST_MODE) {
+    return res.status(403).json({ error: 'Test mode is disabled' });
+  }
   if (req.get('X-Test-Password') !== TEST_PASSWORD) {
     return res.status(403).json({ error: 'Invalid test password' });
   }
@@ -255,9 +310,6 @@ function resolveTargetPlayer(players, shooterId, requestedTargetId = null) {
     }
     return target.player_id;
   }
-  if (aliveOpponents.length === 1) {
-    return aliveOpponents[0].player_id;
-  }
   return aliveOpponents[0].player_id;
 }
 
@@ -267,76 +319,75 @@ app.get('/api/health', asyncHandler(async (req, res) => {
 }));
 
 app.post('/api/reset', asyncHandler(async (req, res) => {
-  await pool.query('TRUNCATE TABLE moves, ships, game_players, games, players RESTART IDENTITY CASCADE');
+  await pool.query('TRUNCATE TABLE moves, ships, game_players, games, players CASCADE');
   res.json({ status: 'reset' });
 }));
 
 app.post('/api/players', asyncHandler(async (req, res) => {
-  const { player_id, playerId } = req.body || {};
-  if (player_id !== undefined || playerId !== undefined) {
-    throw badRequest('Client-supplied playerId is not allowed');
-  }
-
   const normalized = normalizeName(req.body);
   if (!normalized) {
     throw badRequest('username is required');
   }
 
-  const result = await pool.query(
-    `INSERT INTO players (display_name)
-     VALUES ($1)
-     ON CONFLICT (display_name)
-     DO UPDATE SET display_name = EXCLUDED.display_name
-     RETURNING id`,
-    [normalized]
-  );
+  const client = await pool.connect();
+  try {
+    const player = await resolvePlayerIdentity(client, req.body || {}, {
+      rejectClientSuppliedPlayerId: true,
+      allowCreationFromName: true,
+      requireIdentity: true,
+      createErrorMessage: 'username is required',
+    });
 
-  res.status(201).json({ player_id: result.rows[0].id });
+    res.status(201).json({ player_id: player.id });
+  } finally {
+    client.release();
+  }
 }));
 
 app.get('/api/players/:id', asyncHandler(async (req, res) => {
-  const playerId = toPositiveInteger(req.params.id);
-  const stats = await getStats(pool, playerId);
+  const stats = await getStats(pool, req.params.id);
   res.json(stats);
 }));
 
 app.get('/api/players/:id/stats', asyncHandler(async (req, res) => {
-  const playerId = toPositiveInteger(req.params.id);
-  const stats = await getStats(pool, playerId);
+  const stats = await getStats(pool, req.params.id);
   res.json(stats);
 }));
 
 app.post('/api/games', asyncHandler(async (req, res) => {
   const { grid_size, max_players, is_ai } = req.body || {};
   const gridSize = Number.isInteger(grid_size) ? grid_size : null;
-  const maxPlayers = max_players === undefined ? 3 : toPositiveInteger(max_players);
+  const maxPlayers = max_players === undefined ? null : toPositiveInteger(max_players);
 
   if (!Number.isInteger(gridSize) || gridSize < 5 || gridSize > 15) {
     throw badRequest('grid_size must be an integer between 5 and 15');
   }
-  if (!maxPlayers || maxPlayers < 2 || maxPlayers > 50) {
-    throw badRequest('max_players must be an integer between 2 and 50');
+  if (!maxPlayers || maxPlayers < 1 || maxPlayers > 50) {
+    throw badRequest('max_players must be an integer between 1 and 50');
   }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
 
-    const creator = await getOrCreatePlayer(client, req.body || {});
+    const creator = await resolvePlayerIdentity(client, req.body || {}, {
+      allowCreationFromName: true,
+      requireIdentity: true,
+      createErrorMessage: 'creator identity is required',
+    });
+
     const gameResult = await client.query(
       `INSERT INTO games (creator_id, grid_size, max_players, status, current_turn_index)
        VALUES ($1, $2, $3, 'waiting', 0)
        RETURNING *`,
-      [creator?.id || null, gridSize, maxPlayers]
+      [creator.id, gridSize, maxPlayers]
     );
 
-    if (creator) {
-      await client.query(
-        `INSERT INTO game_players (game_id, player_id, turn_order, is_ai)
-         VALUES ($1, $2, 0, $3)`,
-        [gameResult.rows[0].id, creator.id, Boolean(is_ai)]
-      );
-    }
+    await client.query(
+      `INSERT INTO game_players (game_id, player_id, turn_order, is_ai)
+       VALUES ($1, $2, 0, $3)`,
+      [gameResult.rows[0].id, creator.id, Boolean(is_ai)]
+    );
 
     await client.query('COMMIT');
     const gameState = await maybeActivateGame(pool, gameResult.rows[0].id);
@@ -363,19 +414,19 @@ app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
     if (game.status !== 'waiting') {
       throw conflict('Game already started');
     }
-    
     if (players.length >= game.max_players) {
       throw conflict('Game is full');
     }
 
-    const player = await getOrCreatePlayer(client, req.body || {});
-    if (!player) {
-      throw badRequest('player_id or username is required');
-    }
+    const player = await resolvePlayerIdentity(client, req.body || {}, {
+      allowCreationFromName: true,
+      requireIdentity: true,
+      createErrorMessage: 'player identity is required',
+    });
 
     const alreadyInGame = players.some((p) => p.player_id === player.id);
     if (alreadyInGame) {
-      throw conflict('Player already joined this game');
+      throw badRequest('Player already joined this game');
     }
 
     const nextTurn = players.length;
@@ -396,7 +447,7 @@ app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.code === '23505') {
-      throw conflict('Player already joined this game');
+      throw badRequest('Player already joined this game');
     }
     throw error;
   } finally {
@@ -416,7 +467,7 @@ app.get('/api/games/:id', asyncHandler(async (req, res) => {
 
 app.post('/api/games/:id/place', asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
-  const resolvedPlayerId = toPositiveInteger(req.body?.player_id ?? req.body?.playerId);
+  const resolvedPlayerId = toUuid(req.body?.player_id ?? req.body?.playerId);
 
   if (!gameId) {
     throw badRequest('Invalid game id');
@@ -436,7 +487,7 @@ app.post('/api/games/:id/place', asyncHandler(async (req, res) => {
 
     const membership = players.find((p) => p.player_id === resolvedPlayerId);
     if (!membership) {
-      throw badRequest('Player is not part of this game');
+      throw forbidden('Player is not part of this game');
     }
     if (membership.placement_done) {
       throw conflict('Ships have already been placed for this player');
@@ -444,7 +495,6 @@ app.post('/api/games/:id/place', asyncHandler(async (req, res) => {
 
     validateCoordinates(req.body?.ships, game.grid_size);
 
-    const ships = req.body.ships;
     const existingOwnShips = await client.query(
       `SELECT row, col
        FROM ships
@@ -456,7 +506,7 @@ app.post('/api/games/:id/place', asyncHandler(async (req, res) => {
       throw conflict('Ships have already been placed for this player');
     }
 
-    for (const ship of ships) {
+    for (const ship of req.body.ships) {
       await client.query(
         `INSERT INTO ships (game_id, player_id, row, col)
          VALUES ($1, $2, $3, $4)`,
@@ -487,15 +537,15 @@ app.post('/api/games/:id/place', asyncHandler(async (req, res) => {
 
 app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
-  const resolvedPlayerId = toPositiveInteger(req.body?.player_id ?? req.body?.playerId);
-  const targetPlayerIdParam = toPositiveInteger(req.body?.target_player_id ?? req.body?.targetPlayerId);
+  const resolvedPlayerId = toUuid(req.body?.player_id ?? req.body?.playerId);
+  const targetPlayerIdParam = toUuid(req.body?.target_player_id ?? req.body?.targetPlayerId);
   const { row, col } = req.body || {};
 
   if (!gameId) {
     throw badRequest('Invalid game id');
   }
   if (!resolvedPlayerId) {
-    throw badRequest('Invalid player_id');
+    throw forbidden('Invalid player_id');
   }
   if (!Number.isInteger(row) || !Number.isInteger(col)) {
     throw badRequest('row and col must be integers');
@@ -506,30 +556,27 @@ app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
     await client.query('BEGIN');
     const { game, players } = await getGameWithPlayers(client, gameId);
 
-    if (game.status === 'waiting') {
-      throw conflict('Firing is not allowed until all players have placed ships');
-    }
-    if (game.status === 'finished') {
-      throw gone('Game is finished');
+    if (game.status !== 'active') {
+      throw forbidden('Game is not active');
     }
 
     const membership = players.find((p) => p.player_id === resolvedPlayerId);
     if (!membership) {
-      throw badRequest('Player is not part of this game');
+      throw forbidden('Player is not part of this game');
     }
     if (membership.eliminated_at) {
-      throw conflict('Eliminated players cannot move');
+      throw forbidden('Eliminated players cannot move');
     }
     if (row < 0 || row >= game.grid_size || col < 0 || col >= game.grid_size) {
       throw badRequest('Shot is out of bounds');
     }
     if (membership.turn_order !== game.current_turn_index) {
-      throw conflict('It is not this player\'s turn');
+      throw forbidden('It is not this player\'s turn');
     }
 
     const targetPlayerId = resolveTargetPlayer(players, resolvedPlayerId, targetPlayerIdParam);
     if (!targetPlayerId) {
-      throw conflict('No valid target player remains');
+      throw forbidden('No valid target player remains');
     }
 
     const duplicateMove = await client.query(
@@ -715,13 +762,13 @@ app.post('/api/test/games/:id/restart', requireTestMode, asyncHandler(async (req
     await client.query('ROLLBACK');
     throw error;
   } finally {
-    client.release(); 
+    client.release();
   }
 }));
 
 app.post('/api/test/games/:id/ships', requireTestMode, asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
-  const resolvedPlayerId = toPositiveInteger(req.body?.player_id ?? req.body?.playerId);
+  const resolvedPlayerId = toUuid(req.body?.player_id ?? req.body?.playerId);
 
   if (!gameId) {
     throw badRequest('Invalid game id');
@@ -774,7 +821,7 @@ app.post('/api/test/games/:id/ships', requireTestMode, asyncHandler(async (req, 
 
 app.get('/api/test/games/:id/board/:playerId', requireTestMode, asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
-  const playerId = toPositiveInteger(req.params.playerId);
+  const playerId = toUuid(req.params.playerId);
 
   if (!gameId) {
     throw badRequest('Invalid game id');
