@@ -688,8 +688,13 @@ app.post('/api/games/:id/fire', asyncHandler(async (req, res) => {
       game_status: gameStatus,
       winner_id: winnerId,
     });
-  } catch (error) {
+    } catch (error) {
     await client.query('ROLLBACK');
+
+    if (error.code === '23505') {
+      throw conflict('That coordinate has already been fired upon');
+    }
+
     throw error;
   } finally {
     client.release();
@@ -701,6 +706,8 @@ app.get('/api/games/:id/moves', asyncHandler(async (req, res) => {
   if (!gameId) {
     throw badRequest('Invalid game id');
   }
+
+  await getGameWithPlayers(pool, gameId);
 
   const result = await pool.query(
     `SELECT m.id AS move_id, m.row, m.col, m.result, m.created_at,
