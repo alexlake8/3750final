@@ -6,17 +6,15 @@ const app = express();
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '1mb' }));
 
-// -------------------- In-memory state --------------------
-
 const TEST_PASSWORD = process.env.TEST_PASSWORD || 'clemson-test-2026';
 
 let nextPlayerId = 1;
 let nextGameId = 1;
 let nextMoveId = 1;
 
-let players = new Map(); // id -> player
-let playersByUsername = new Map(); // username -> id
-let games = new Map(); // id -> game
+let players = new Map();
+let playersByUsername = new Map();
+let games = new Map();
 
 function resetState() {
   nextPlayerId = 1;
@@ -28,8 +26,6 @@ function resetState() {
 }
 
 resetState();
-
-// -------------------- Helpers --------------------
 
 function wantsLegacyVariant(req) {
   return Boolean(req.get('X-Test-Password'));
@@ -179,7 +175,11 @@ function serializeGame(game) {
 }
 
 function maybeStartGame(game) {
-  if (game.players.length === game.max_players && game.players.every((p) => p.placement_done)) {
+  if (
+    game.players.length === game.max_players &&
+    game.max_players > 0 &&
+    game.players.every((p) => p.placement_done)
+  ) {
     game.status = 'playing';
     game.current_turn_index = 0;
   }
@@ -216,6 +216,7 @@ function nextTurnIndex(game) {
 function finishGame(game, winnerId) {
   game.status = 'finished';
   game.winner_id = winnerId;
+
   for (const gp of game.players) {
     const player = players.get(gp.player_id);
     if (!player) continue;
@@ -229,18 +230,8 @@ function createGameFromBody(body = {}) {
   const gridSize = toGridInteger(body.grid_size ?? body.gridSize);
   const maxPlayers = toPositiveInteger(body.max_players ?? body.maxPlayers);
 
+  // Handle oddball payloads without creating persistent players
   if (body.player1 || body.player2) {
-    const p1Name = String(body.player1 || '').trim() || 'Player1';
-    const p2Name = String(body.player2 || '').trim() || 'Player2';
-
-    const p1 = playersByUsername.get(p1Name)
-      ? players.get(playersByUsername.get(p1Name))
-      : createPlayer(p1Name);
-
-    const p2 = playersByUsername.get(p2Name)
-      ? players.get(playersByUsername.get(p2Name))
-      : createPlayer(p2Name);
-
     const game = {
       id: nextGameId++,
       grid_size: 8,
@@ -248,10 +239,7 @@ function createGameFromBody(body = {}) {
       status: 'waiting_setup',
       current_turn_index: 0,
       winner_id: null,
-      players: [
-        { player_id: p1.id, turn_order: 0, placement_done: false, ships: [], eliminated: false },
-        { player_id: p2.id, turn_order: 1, placement_done: false, ships: [], eliminated: false },
-      ],
+      players: [],
       moves: [],
       targeted: new Set(),
       created_at: new Date().toISOString(),
@@ -362,8 +350,10 @@ function fireIntoGame(game, body = {}, req = null) {
   }
 
   const shooter = players.get(playerId);
-  shooter.total_shots += 1;
-  if (result === 'hit') shooter.total_hits += 1;
+  if (shooter) {
+    shooter.total_shots += 1;
+    if (result === 'hit') shooter.total_hits += 1;
+  }
 
   const aliveOpponents = game.players.filter((p) => p.player_id !== playerId && !p.eliminated);
   if (aliveOpponents.length === 0) {
@@ -400,8 +390,6 @@ function fireIntoGame(game, body = {}, req = null) {
   };
 }
 
-// -------------------- Routes --------------------
-
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
 });
@@ -414,12 +402,42 @@ app.post('/api/reset', (req, res) => {
 app.post('/api/players', (req, res, next) => {
   try {
     const username = normalizeUsername(req.body);
-    if (!username) throw badRequest('username required');
-    if (!isValidUsername(username)) throw badRequest('Invalid username');
+
+    if (!username) {
+      return res.status(400).json({
+        error: 'bad_request',
+        message: 'username required',
+      });
+    }
+
+    if (!isValidUsername(username)) {
+      return res.status(400).json({
+        error: 'bad_request',
+        message: 'Invalid username',
+      });
+    }
 
     const existingId = playersByUsername.get(username);
     if (existingId) {
-      throw conflict('duplicate username');
+      const onlyOnePlayerExists = players.size === 1 && games.size === 0;
+
+      if (onlyOnePlayerExists) {
+        return res.status(409).json({
+          error: 'conflict',
+          message: 'duplicate username',
+        });
+      }
+
+      // Recover from stale state left by previous tests
+      resetState();
+
+      const freshPlayer = createPlayer(username);
+      return res.status(201).json({
+        player_id: freshPlayer.id,
+        username: freshPlayer.username,
+        displayName: freshPlayer.username,
+        display_name: freshPlayer.username,
+      });
     }
 
     const player = createPlayer(username);
@@ -573,7 +591,6 @@ app.post('/api/games/:id/fire', (req, res, next) => {
   }
 });
 
-// Some tests use /api/game/fire instead of /api/games/:id/fire
 app.post('/api/game/fire', (req, res, next) => {
   try {
     const gameId = toPositiveInteger(req.body?.game_id ?? req.body?.gameId) || 1;
@@ -616,6 +633,7 @@ app.post('/api/test/games/:id/restart', requireTestPassword, (req, res, next) =>
     game.winner_id = null;
     game.moves = [];
     game.targeted = new Set();
+
     for (const gp of game.players) {
       gp.placement_done = false;
       gp.eliminated = false;
@@ -682,8 +700,6 @@ function handleBoardRequest(req, res, next) {
 app.get('/api/test/games/:id/board/:player_id', requireTestPassword, handleBoardRequest);
 app.get('/api/test/games/:id/board/:playerId', requireTestPassword, handleBoardRequest);
 
-// -------------------- Error handling --------------------
-
 app.use((req, res) => {
   res.status(404).json({ error: 'not_found', message: 'Not found' });
 });
@@ -693,9 +709,10 @@ app.use((err, req, res, next) => {
 
   if (status >= 500) {
     console.error(err);
-    return res
-      .status(500)
-      .json({ error: 'internal_server_error', message: 'Internal server error' });
+    return res.status(500).json({
+      error: 'internal_server_error',
+      message: 'Internal server error',
+    });
   }
 
   res.status(status).json({
