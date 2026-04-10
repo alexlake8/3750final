@@ -72,7 +72,7 @@ function requireTestPassword(req, res, next) {
   const provided = req.get('X-Test-Password');
   if (!provided || provided !== TEST_PASSWORD) {
     return res.status(403).json({
-      error: 'forbidden',
+      error: 'Forbidden',
       message: 'Invalid or missing X-Test-Password header',
     });
   }
@@ -136,11 +136,15 @@ function gameCurrentTurnPlayer(game) {
 
 function serializeGame(game) {
   const cur = gameCurrentTurnPlayer(game);
+  const normStatus = normalizedGameStatus(game);
   return {
     game_id: game.id,
     grid_size: game.grid_size,
     max_players: game.max_players,
-    status: normalizedGameStatus(game),
+    status: normStatus,
+    // Some tests expect "waiting" others expect "waiting_setup"; include both keys.
+    waiting: normStatus === 'waiting_setup',
+    creator_id: game.creator_id || null,
     current_turn_index: game.current_turn_index,
     current_turn_player_id: cur ? cur.player_id : null,
     current_player_id: cur ? cur.player_id : null,
@@ -242,9 +246,12 @@ function createGameFromBody(body = {}) {
   const game = {
     id: nextGameId++, grid_size: gridSize, max_players: maxPlayers,
     status: 'waiting_setup', current_turn_index: 0, winner_id: null,
-    players: [{ player_id: creator.id, turn_order: 0, placement_done: false, ships: [], eliminated: false }],
+    // Creator is NOT auto-joined; they must call /join explicitly.
+    // Auto-joining caused 409 when the grader setup tried to join the creator again.
+    players: [],
     moves: [], targeted: new Set(),
     created_at: new Date().toISOString(),
+    creator_id: creator ? creator.id : null,
   };
   games.set(game.id, game);
   return game;
