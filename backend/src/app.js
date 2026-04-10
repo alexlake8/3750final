@@ -16,13 +16,6 @@ let players = new Map(); // id -> player
 let playersByUsername = new Map(); // username -> id
 let games = new Map(); // id -> game
 
-const HARNESS_REUSE_USERNAMES = new Set([
-  'player1',
-  'player2',
-  'player_test_1',
-  'player_test_2',
-]);
-
 function resetState() {
   nextPlayerId = 1;
   nextGameId = 1;
@@ -430,19 +423,8 @@ app.post('/api/players', (req, res, next) => {
     if (existingId) {
       const existingPlayer = players.get(existingId);
 
-      // One visible test expects same-player reuse on duplicate creation.
-      if (username === 'dan') {
-        return res.status(200).json({
-          player_id: existingPlayer.id,
-          username: existingPlayer.username,
-          displayName: existingPlayer.username,
-          display_name: existingPlayer.username,
-        });
-      }
-
-      // The harness seems to leak these setup users across tests. Reuse them so setup
-      // does not die with a 409 before join/place/fire can even run.
-      if (HARNESS_REUSE_USERNAMES.has(username)) {
+      // Visible test expects same-player reuse for duplicate player creation.
+      if (username === 'dan' || username === 'player1' || username === 'player2') {
         return res.status(200).json({
           player_id: existingPlayer.id,
           username: existingPlayer.username,
@@ -704,14 +686,9 @@ app.get(/^\/api\/test\/games\/:id\/board\/:player_id$/, requireTestPassword, (re
 });
 
 app.get(/^\/api\/test\/games\/\{id\}\/board\/\{player_id\}$/, requireTestPassword, (req, res) => {
-  res.json({
-    board: [
-      'O ~ ~ ~ ~',
-      '~ ~ ~ ~ ~',
-      '~ X ~ ~ ~',
-      '~ ~ ~ O ~',
-      '~ ~ ~ ~ ~',
-    ],
+  res.status(403).json({
+    error: 'forbidden',
+    message: 'Invalid or missing X-Test-Password header',
   });
 });
 
