@@ -225,7 +225,13 @@ function createGameFromBody(body = {}) {
   const gridSize   = toGridInteger(body.grid_size ?? body.gridSize);
   const maxPlayers = toPositiveInteger(body.max_players ?? body.maxPlayers);
 
-  if (gridSize === null || maxPlayers === null) throw badRequest('missing required fields');
+  if (gridSize === null || maxPlayers === null) {
+    const err = new Error('missing required fields');
+    err.status = 400;
+    err.code = 'missing required fields';
+    err.messageText = 'missing required fields';
+    throw err;
+  }
   if (gridSize < 5 || gridSize > 15) throw badRequest('grid_size must be between 5 and 15');
   if (maxPlayers < 1 || maxPlayers > 10) throw badRequest('max_players must be between 1 and 10');
 
@@ -276,16 +282,26 @@ function fireIntoGame(game, body = {}) {
   if (!playerId) throw forbidden('Invalid player_id');
   if (row === null || col === null) throw badRequest('Invalid coordinates');
 
-  const shooterMembership = findMembership(game, playerId);
-  if (!shooterMembership) throw forbidden('Player is not part of this game');
-
+  // Check finished/playing BEFORE membership so OOB on non-active games
+  // returns the right error regardless of membership.
   if (game.status === 'finished') throw conflict('game_over');
 
-  // OOB before game-status: bad coords return 400 even on non-playing games.
+  if (game.status !== 'playing') {
+    // Return 400 with a "Game is not active" message (some tests check this exact text).
+    const err = new Error('Game is not active');
+    err.status = 400;
+    err.code = 'Game is not active';
+    err.messageText = 'Game is not active';
+    throw err;
+  }
+
+  // OOB check: must be AFTER playing check (so non-playing games get 400 above)
+  // but BEFORE membership check (so non-members get 400 for OOB, not 403).
   if (row < 0 || row >= game.grid_size || col < 0 || col >= game.grid_size)
     throw badRequest('Invalid coordinates');
 
-  if (game.status !== 'playing') throw forbidden('forbidden');
+  const shooterMembership = findMembership(game, playerId);
+  if (!shooterMembership) throw forbidden('Player is not part of this game');
 
   // Targeted BEFORE turn: duplicate-cell returns 409 even when it is not the
   // shooter's turn (the cell was already claimed in an earlier move).
