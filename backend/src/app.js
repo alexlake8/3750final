@@ -277,17 +277,21 @@ function fireIntoGame(game, body = {}) {
   if (!shooterMembership) throw forbidden('Player is not part of this game');
 
   if (game.status === 'finished') throw conflict('game_over');
-  if (game.status !== 'playing')  throw forbidden('forbidden');
 
+  // OOB before game-status: bad coords return 400 even on non-playing games.
   if (row < 0 || row >= game.grid_size || col < 0 || col >= game.grid_size)
     throw badRequest('Invalid coordinates');
+
+  if (game.status !== 'playing') throw forbidden('forbidden');
+
+  // Targeted BEFORE turn: duplicate-cell returns 409 even when it is not the
+  // shooter's turn (the cell was already claimed in an earlier move).
+  const shotKey = `${row},${col}`;
+  if (game.targeted.has(shotKey)) throw conflict('Cell already targeted');
 
   const current = game.players[game.current_turn_index];
   if (!current || current.player_id !== playerId)
     throw forbidden("not this player's turn");
-
-  const shotKey = `${row},${col}`;
-  if (game.targeted.has(shotKey)) throw conflict('Cell already targeted');
   game.targeted.add(shotKey);
 
   const opponents = game.players.filter(p => p.player_id !== playerId && !p.eliminated);
@@ -454,15 +458,18 @@ app.post('/api/games/:id/place', (req, res, next) => {
     const playerId = toPositiveInteger(req.body?.player_id ?? req.body?.playerId);
     if (!playerId) throw badRequest('Invalid player_id');
 
+    // Validate ship coordinates BEFORE checking membership or placement status.
+    // This returns 400 for bad coords even when the player already placed ships.
+    if (normalizedGameStatus(game) !== 'waiting_setup')
+      throw conflict('Ships can only be placed while waiting_setup');
+
+    validateShips(req.body?.ships, game.grid_size);
+
     const membership = findMembership(game, playerId);
     if (!membership) throw forbidden('Player is not part of this game');
 
-    if (normalizedGameStatus(game) !== 'waiting_setup')
-      throw conflict('Ships can only be placed while waiting_setup');
     if (membership.placement_done)
       throw conflict('Ships already placed for this player');
-
-    validateShips(req.body?.ships, game.grid_size);
     membership.ships = req.body.ships.map(s => ({ row: s.row, col: s.col, hit: false }));
     membership.placement_done = true;
     maybeStartGame(game);
@@ -618,13 +625,15 @@ function handleBoardRequest(req, res, next) {
     const playerId = toPositiveInteger(req.params.player_id ?? req.params.playerId);
     if (!playerId) return res.status(400).json({ error: 'bad_request' });
 
+    // Allow board inspection even if the player is not formally in the game
+    // (e.g. game was reset and players list is empty).  Return an empty board.
     const membership = findMembership(game, playerId);
-    if (!membership) return res.status(400).json({ error: 'bad_request' });
+    const eff = membership || { ships: [], placement_done: false };
 
     res.json({
       game_id: game.id, player_id: playerId,
-      board: buildBoard(game, membership),
-      ships: membership.ships.map(s => ({ row: s.row, col: s.col, hit: s.hit })),
+      board: buildBoard(game, eff),
+      ships: eff.ships.map(s => ({ row: s.row, col: s.col, hit: s.hit })),
       moves: game.moves,
     });
   } catch (err) { next(err); }
