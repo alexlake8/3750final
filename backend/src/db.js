@@ -7,7 +7,11 @@ if (!process.env.DATABASE_URL) {
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.DATABASE_URL.includes('localhost') ? false : { rejectUnauthorized: false },
+  connectionTimeoutMillis: 5000,  // ← add this line
+  idleTimeoutMillis: 30000,       // ← and this
 });
+
+
 
 async function resetSchemaIfNeeded() {
   const result = await pool.query(`
