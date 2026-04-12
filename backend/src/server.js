@@ -1,3 +1,4 @@
+console.log('ENV CHECK:', !!process.env.DATABASE_URL, process.env.PORT);
 require('dotenv').config();
 const app = require('./app');
 const { initDb } = require('./db');
