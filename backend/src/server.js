@@ -4,14 +4,13 @@ const { initDb } = require('./db');
 
 const PORT = Number(process.env.PORT || 10000);
 
-async function start() {
-  await initDb();
-  app.listen(PORT, () => {
-    console.log(`Battleship API listening on port ${PORT}`);
-  });
-}
+// Start listening immediately so Render detects the port
+app.listen(PORT, () => {
+  console.log(`Battleship API listening on port ${PORT}`);
+});
 
-start().catch((error) => {
-  console.error('Failed to start server', error);
+// Then init the DB in the background
+initDb().catch((error) => {
+  console.error('Failed to initialize database', error);
   process.exit(1);
 });
