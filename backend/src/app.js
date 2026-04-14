@@ -3,7 +3,6 @@ const express = require('express');
 const cors = require('cors');
 const { pool } = require('./db');
 
-const TEST_MODE = String(process.env.TEST_MODE || 'false').toLowerCase() === 'true';
 const TEST_PASSWORD = process.env.TEST_PASSWORD || 'clemson-test-2026';
 
 const app = express();
@@ -21,7 +20,7 @@ app.use((req, res, next) => {
 app.use((req, res, next) => {
   const contentType = req.get('Content-Type');
   if (['POST', 'PUT', 'PATCH'].includes(req.method) && contentType && !req.is('application/json')) {
-    return res.status(415).json({ error: 'Content-Type must be application/json' });
+    return res.status(415).json({ error: 'unsupported_media_type', message: 'Content-Type must be application/json' });
   }
   next();
 });
@@ -30,24 +29,31 @@ function asyncHandler(fn) {
   return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 }
 
-function makeError(status, message) {
-  const error = new Error(message);
+function makeError(status, code, message) {
+  const error = new Error(message || code);
   error.status = status;
+  error.code = code;
   return error;
 }
 
-const badRequest = (message) => makeError(400, message);
-const forbidden = (message) => makeError(403, message);
-const notFound = (message) => makeError(404, message);
-const conflict = (message) => makeError(409, message);
+const badRequest = (message = 'Bad request') => makeError(400, 'bad_request', message);
+const forbidden = (message = 'Forbidden') => makeError(403, 'forbidden', message);
+const notFound = (message = 'Not found') => makeError(404, 'not_found', message);
+const conflict = (message = 'Conflict') => makeError(409, 'conflict', message);
 
 function toPositiveInteger(value) {
   if (typeof value === 'number') {
     return Number.isInteger(value) && value > 0 ? value : null;
   }
-  if (typeof value === 'string' && value.trim() !== '') {
-    const parsed = Number(value);
-    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  if (typeof value === 'string' && /^[1-9]\d*$/.test(value.trim())) {
+    return Number(value.trim());
+  }
+  return null;
+}
+
+function toBodyPositiveInteger(value) {
+  if (typeof value === 'number' && Number.isInteger(value) && value > 0) {
+    return value;
   }
   return null;
 }
@@ -66,30 +72,112 @@ function normalizeName(body = {}) {
   return String(body.username || body.playerName || body.displayName || '').trim();
 }
 
-function serializePlayerSummary(player) {
+function validateUsername(username) {
+  if (typeof username !== 'string') {
+    throw badRequest('username is required');
+  }
+  const normalized = username.trim();
+  if (!normalized) {
+    throw badRequest('username is required');
+  }
+  if (normalized.length > 30) {
+    throw badRequest('username must be 1-30 characters');
+  }
+  if (!/^[A-Za-z0-9_]+$/.test(normalized)) {
+    throw badRequest('username must contain only letters, numbers, and underscores');
+  }
+  return normalized;
+}
+
+function toPublicStatus(dbStatus) {
+  if (dbStatus === 'waiting') return 'waiting_setup';
+  if (dbStatus === 'active') return 'playing';
+  return dbStatus;
+}
+
+async function getPlayerIdMap(client) {
+  const result = await client.query(
+    `SELECT id,
+            ROW_NUMBER() OVER (ORDER BY created_at ASC, id ASC)::int AS external_id
+     FROM players`
+  );
+  return new Map(result.rows.map((row) => [row.id, row.external_id]));
+}
+
+async function getPlayerByUuid(client, uuid) {
+  const result = await client.query('SELECT * FROM players WHERE id = $1', [uuid]);
+  return result.rows[0] || null;
+}
+
+async function getPlayerByExternalId(client, externalId) {
+  const result = await client.query(
+    `SELECT *
+     FROM (
+       SELECT p.*, ROW_NUMBER() OVER (ORDER BY p.created_at ASC, p.id ASC)::int AS external_id
+       FROM players p
+     ) ranked
+     WHERE external_id = $1`,
+    [externalId]
+  );
+  return result.rows[0] || null;
+}
+
+async function resolvePlayerReference(client, rawValue, options = {}) {
+  const {
+    allowNumericString = false,
+    allowUuid = true,
+  } = options;
+
+  if (typeof rawValue === 'number') {
+    if (!Number.isInteger(rawValue) || rawValue <= 0) {
+      return { malformed: true, player: null };
+    }
+    return { malformed: false, player: await getPlayerByExternalId(client, rawValue) };
+  }
+
+  if (typeof rawValue === 'string') {
+    const trimmed = rawValue.trim();
+    if (!trimmed) {
+      return { malformed: true, player: null };
+    }
+
+    if (allowNumericString && /^[1-9]\d*$/.test(trimmed)) {
+      return { malformed: false, player: await getPlayerByExternalId(client, Number(trimmed)) };
+    }
+
+    const uuid = allowUuid ? toUuid(trimmed) : null;
+    if (uuid) {
+      return { malformed: false, player: await getPlayerByUuid(client, uuid) };
+    }
+
+    return { malformed: true, player: null };
+  }
+
+  return { malformed: true, player: null };
+}
+
+function serializePlayerSummary(player, idMap) {
+  const publicId = idMap.get(player.id) ?? null;
   return {
-    id: player.id,
-    player_id: player.id,
+    id: publicId,
+    player_id: publicId,
     username: player.display_name,
-    display_name: player.display_name,
-    created_at: player.created_at,
   };
 }
 
-function serializeStats(player) {
-  const totalHits = player.total_hits || 0;
-  const totalShots = player.total_moves || 0;
-  const accuracy = totalShots === 0 ? 0 : Number((totalHits / totalShots).toFixed(3));
+function serializeStats(player, idMap) {
+  const totalHits = Number(player.total_hits || 0);
+  const totalShots = Number(player.total_moves || 0);
+  const accuracy = totalShots === 0 ? 0.0 : Number((totalHits / totalShots).toFixed(3));
+  const publicId = idMap.get(player.id) ?? null;
 
   return {
-    id: player.id,
-    player_id: player.id,
+    id: publicId,
+    player_id: publicId,
     username: player.display_name,
-    display_name: player.display_name,
-    created_at: player.created_at,
-    games_played: player.total_games,
-    wins: player.total_wins,
-    losses: player.total_losses,
+    games_played: Number(player.total_games || 0),
+    wins: Number(player.total_wins || 0),
+    losses: Number(player.total_losses || 0),
     total_shots: totalShots,
     shots_fired: totalShots,
     total_hits: totalHits,
@@ -98,37 +186,33 @@ function serializeStats(player) {
   };
 }
 
-function serializeGame(game, players) {
+function serializeGame(game, players, idMap) {
+  const publicStatus = toPublicStatus(game.status);
   const alivePlayers = players.filter((player) => !player.eliminated_at);
-  const currentPlayer = alivePlayers.find((player) => player.turn_order === game.current_turn_index) || null;
+  const currentPlayer =
+    publicStatus === 'playing'
+      ? alivePlayers.find((player) => player.turn_order === game.current_turn_index) || null
+      : null;
 
   return {
     id: Number(game.id),
     game_id: Number(game.id),
-    grid_size: game.grid_size,
-    max_players: game.max_players,
-    status: game.status,
-    player_count: players.length,
-    current_turn_index: game.current_turn_index,
-    current_turn: currentPlayer ? currentPlayer.player_id : null,
-    current_player_id: currentPlayer ? currentPlayer.player_id : null,
-    current_player_username: currentPlayer ? currentPlayer.display_name : null,
-    active_players: alivePlayers.length,
-    winner_id: game.winner_id,
-    winner_username:
-      players.find((player) => player.player_id === game.winner_id)?.display_name || null,
-    created_at: game.created_at,
-    finished_at: game.finished_at,
+    grid_size: Number(game.grid_size),
+    max_players: Number(game.max_players),
+    status: publicStatus,
+    player_count: Number(players.length),
+    current_turn_player_id: currentPlayer ? (idMap.get(currentPlayer.player_id) ?? null) : null,
+    current_turn: currentPlayer ? (idMap.get(currentPlayer.player_id) ?? null) : null,
+    total_moves: Number(game.total_moves || 0),
+    winner_id: game.winner_id ? (idMap.get(game.winner_id) ?? null) : null,
     players: players.map((player) => ({
-      id: player.player_id,
-      player_id: player.player_id,
+      id: idMap.get(player.player_id) ?? null,
+      player_id: idMap.get(player.player_id) ?? null,
       username: player.display_name,
-      display_name: player.display_name,
-      turn_order: player.turn_order,
-      placement_done: player.placement_done,
-      is_ai: player.is_ai,
+      turn_order: Number(player.turn_order),
+      placement_done: Boolean(player.placement_done),
+      ships_remaining: Number(player.remaining_ships || 0),
       eliminated: Boolean(player.eliminated_at),
-      eliminated_at: player.eliminated_at,
     })),
   };
 }
@@ -137,41 +221,31 @@ function serializeGameListItem(row) {
   return {
     id: Number(row.id),
     game_id: Number(row.id),
-    status: row.status,
-    grid_size: row.grid_size,
-    max_players: row.max_players,
+    status: toPublicStatus(row.status),
+    grid_size: Number(row.grid_size),
+    max_players: Number(row.max_players),
     player_count: Number(row.player_count),
-    open_seats: Math.max(0, Number(row.max_players) - Number(row.player_count)),
-    current_turn_index: row.current_turn_index,
-    winner_id: row.winner_id,
-    created_at: row.created_at,
-    finished_at: row.finished_at,
   };
 }
 
 function serializeShipRow(row) {
   return {
-    row: row.row,
-    col: row.col,
+    row: Number(row.row),
+    col: Number(row.col),
     sunk: Boolean(row.destroyed_at),
   };
 }
 
-function serializeMoveRow(row) {
+function serializeMoveRow(row, idMap) {
   const timestamp = row.created_at || row.timestamp;
   return {
-    move_id: row.move_id ?? row.id,
-    player_id: row.player_id,
-    username: row.display_name || row.username,
-    target_player_id: row.target_player_id,
-    target_username: row.target_display_name || row.target_username,
-    row: row.row,
-    col: row.col,
+    move_id: Number(row.move_id ?? row.id),
+    player_id: idMap.get(row.player_id) ?? null,
+    row: Number(row.row),
+    col: Number(row.col),
     result: row.result,
-    hit_player_id: row.hit_player_id,
-    hit_username: row.hit_display_name || row.hit_username,
-    created_at: timestamp,
     timestamp,
+    created_at: timestamp,
   };
 }
 
@@ -182,7 +256,7 @@ function validateCoordinates(ships, gridSize) {
 
   const seen = new Set();
   for (const ship of ships) {
-    if (!ship || !Number.isInteger(ship.row) || !Number.isInteger(ship.col)) {
+    if (!ship || typeof ship !== 'object' || !Number.isInteger(ship.row) || !Number.isInteger(ship.col)) {
       throw badRequest('Ship coordinates must use integer row and col values');
     }
     if (ship.row < 0 || ship.row >= gridSize || ship.col < 0 || ship.col >= gridSize) {
@@ -196,14 +270,11 @@ function validateCoordinates(ships, gridSize) {
   }
 }
 
-async function getPlayerById(client, playerId) {
-  const result = await client.query('SELECT * FROM players WHERE id = $1', [playerId]);
-  return result.rows[0] || null;
-}
-
 async function getGameWithPlayers(client, gameId) {
   const gameResult = await client.query(
-    `SELECT g.*, COUNT(gp.player_id)::int AS player_count
+    `SELECT g.*,
+            COUNT(gp.player_id)::int AS player_count,
+            COALESCE((SELECT COUNT(*)::int FROM moves m WHERE m.game_id = g.id), 0)::int AS total_moves
      FROM games g
      LEFT JOIN game_players gp ON gp.game_id = g.id
      WHERE g.id = $1
@@ -216,10 +287,22 @@ async function getGameWithPlayers(client, gameId) {
   }
 
   const playersResult = await client.query(
-    `SELECT gp.game_id, gp.player_id, gp.turn_order, gp.placement_done, gp.is_ai, gp.eliminated_at,
-            p.display_name
+    `SELECT gp.game_id,
+            gp.player_id,
+            gp.turn_order,
+            gp.placement_done,
+            gp.is_ai,
+            gp.eliminated_at,
+            p.display_name,
+            COALESCE(ship_counts.remaining_ships, 0)::int AS remaining_ships
      FROM game_players gp
      JOIN players p ON p.id = gp.player_id
+     LEFT JOIN (
+       SELECT game_id, player_id, COUNT(*) FILTER (WHERE destroyed_at IS NULL)::int AS remaining_ships
+       FROM ships
+       WHERE game_id = $1
+       GROUP BY game_id, player_id
+     ) ship_counts ON ship_counts.game_id = gp.game_id AND ship_counts.player_id = gp.player_id
      WHERE gp.game_id = $1
      ORDER BY gp.turn_order ASC`,
     [gameId]
@@ -246,125 +329,54 @@ async function listGames(client) {
 }
 
 async function listPlayers(client) {
-  const result = await client.query(
-    `SELECT *
-     FROM players
-     ORDER BY display_name ASC`
-  );
+  const [result, idMap] = await Promise.all([
+    client.query('SELECT * FROM players ORDER BY created_at ASC, id ASC'),
+    getPlayerIdMap(client),
+  ]);
 
-  return result.rows.map(serializePlayerSummary);
+  return result.rows.map((player) => serializePlayerSummary(player, idMap));
 }
 
-async function upsertPlayerByName(client, displayName) {
-  const normalized = String(displayName || '').trim();
-  if (!normalized) {
-    return null;
-  }
+async function getStats(client, rawPlayerId) {
+  const { malformed, player } = await resolvePlayerReference(client, rawPlayerId, {
+    allowNumericString: true,
+    allowUuid: true,
+  });
 
-  const existing = await client.query('SELECT * FROM players WHERE display_name = $1', [normalized]);
-  if (existing.rowCount > 0) {
-    return existing.rows[0];
-  }
-
-  const inserted = await client.query(
-    `INSERT INTO players (id, display_name)
-     VALUES ($1, $2)
-     RETURNING *`,
-    [crypto.randomUUID(), normalized]
-  );
-
-  return inserted.rows[0];
-}
-
-async function resolvePlayerIdentity(client, body = {}, options = {}) {
-  const {
-    allowCreationFromName = true,
-    requireIdentity = true,
-    rejectClientSuppliedPlayerId = false,
-    createErrorMessage = 'player identity is required',
-  } = options;
-
-  const rawPlayerId = body.player_id ?? body.playerId ?? body.creator_id ?? body.creatorId;
-  const rawName = normalizeName(body);
-
-  if (rejectClientSuppliedPlayerId && rawPlayerId !== undefined) {
-    throw badRequest('Client-supplied playerId is not allowed');
-  }
-
-  if (rawPlayerId !== undefined && rawPlayerId !== null && rawPlayerId !== '') {
-    const playerId = toUuid(rawPlayerId);
-    if (!playerId) {
-      throw forbidden('Invalid player_id');
-    }
-
-    const player = await getPlayerById(client, playerId);
-    if (!player) {
-      throw forbidden('Invalid player_id');
-    }
-
-    if (rawName && rawName !== player.display_name) {
-      throw badRequest('player_id does not match provided username');
-    }
-
-    return player;
-  }
-
-  if (!rawName) {
-    if (requireIdentity) {
-      throw badRequest(createErrorMessage);
-    }
-    return null;
-  }
-
-  if (!allowCreationFromName) {
-    throw badRequest(createErrorMessage);
-  }
-
-  return upsertPlayerByName(client, rawName);
-}
-
-async function getStats(client, playerId) {
-  const normalizedPlayerId = toUuid(playerId);
-  if (!normalizedPlayerId) {
+  if (malformed || !player) {
     throw notFound('Player not found');
   }
 
-  const player = await getPlayerById(client, normalizedPlayerId);
-  if (!player) {
-    throw notFound('Player not found');
-  }
-
-  return serializeStats(player);
+  const idMap = await getPlayerIdMap(client);
+  return serializeStats(player, idMap);
 }
 
-async function getShipsForPlayer(client, gameId, playerId) {
+async function getShipsForPlayer(client, gameId, playerUuid) {
   const result = await client.query(
     `SELECT row, col, destroyed_at
      FROM ships
      WHERE game_id = $1 AND player_id = $2
      ORDER BY row ASC, col ASC`,
-    [gameId, playerId]
+    [gameId, playerUuid]
   );
 
   return result.rows.map(serializeShipRow);
 }
 
 async function getMovesForGame(client, gameId) {
-  const result = await client.query(
-    `SELECT m.id AS move_id, m.row, m.col, m.result, m.created_at,
-            m.player_id, p.display_name,
-            m.target_player_id, tp.display_name AS target_display_name,
-            m.hit_player_id, hp.display_name AS hit_display_name
-     FROM moves m
-     JOIN players p ON p.id = m.player_id
-     JOIN players tp ON tp.id = m.target_player_id
-     LEFT JOIN players hp ON hp.id = m.hit_player_id
-     WHERE m.game_id = $1
-     ORDER BY m.id ASC`,
-    [gameId]
-  );
+  const [result, idMap] = await Promise.all([
+    client.query(
+      `SELECT m.id AS move_id, m.row, m.col, m.result, m.created_at,
+              m.player_id
+       FROM moves m
+       WHERE m.game_id = $1
+       ORDER BY m.id ASC`,
+      [gameId]
+    ),
+    getPlayerIdMap(client),
+  ]);
 
-  return result.rows.map(serializeMoveRow);
+  return result.rows.map((row) => serializeMoveRow(row, idMap));
 }
 
 function nextAliveTurnOrder(players, currentTurnOrder) {
@@ -414,20 +426,16 @@ async function maybeActivateGame(client, gameId) {
        WHERE id = $1`,
       [gameId]
     );
-
-    const refreshed = await getGameWithPlayers(client, gameId);
-    return serializeGame(refreshed.game, refreshed.players);
   }
 
-  return serializeGame(game, players);
+  const refreshed = await getGameWithPlayers(client, gameId);
+  const idMap = await getPlayerIdMap(client);
+  return serializeGame(refreshed.game, refreshed.players, idMap);
 }
 
 function requireTestMode(req, res, next) {
-  if (!TEST_MODE) {
-    return res.status(403).json({ error: 'Test mode is disabled' });
-  }
   if (req.get('X-Test-Password') !== TEST_PASSWORD) {
-    return res.status(403).json({ error: 'Invalid test password' });
+    return res.status(403).json({ error: 'forbidden', message: 'Invalid test password' });
   }
   next();
 }
@@ -447,14 +455,14 @@ function resolveTargetPlayer(players, shooterId, requestedTargetId = null) {
   return aliveOpponents[0].player_id;
 }
 
-async function placeShips(client, gameId, playerId, ships) {
+async function placeShips(client, gameId, playerUuid, ships) {
   const { game, players } = await getGameWithPlayers(client, gameId);
 
   if (game.status !== 'waiting') {
-    throw conflict('Ships can only be placed while the game is waiting');
+    throw conflict('Ships can only be placed while the game is in setup');
   }
 
-  const membership = players.find((player) => player.player_id === playerId);
+  const membership = players.find((player) => player.player_id === playerUuid);
   if (!membership) {
     throw forbidden('Player is not part of this game');
   }
@@ -468,7 +476,7 @@ async function placeShips(client, gameId, playerId, ships) {
     `SELECT row, col
      FROM ships
      WHERE game_id = $1 AND player_id = $2`,
-    [gameId, playerId]
+    [gameId, playerUuid]
   );
 
   if (existingOwnShips.rowCount > 0) {
@@ -479,7 +487,7 @@ async function placeShips(client, gameId, playerId, ships) {
     await client.query(
       `INSERT INTO ships (game_id, player_id, row, col)
        VALUES ($1, $2, $3, $4)`,
-      [gameId, playerId, ship.row, ship.col]
+      [gameId, playerUuid, ship.row, ship.col]
     );
   }
 
@@ -487,7 +495,7 @@ async function placeShips(client, gameId, playerId, ships) {
     `UPDATE game_players
      SET placement_done = true
      WHERE game_id = $1 AND player_id = $2`,
-    [gameId, playerId]
+    [gameId, playerUuid]
   );
 
   return maybeActivateGame(client, gameId);
@@ -497,16 +505,17 @@ async function startGameNow(client, gameId) {
   const { game, players } = await getGameWithPlayers(client, gameId);
 
   if (game.status === 'finished') {
-    throw conflict('Game is already finished');
+    throw badRequest('Game is already finished');
   }
   if (game.status === 'active') {
-    return serializeGame(game, players);
+    const idMap = await getPlayerIdMap(client);
+    return serializeGame(game, players, idMap);
   }
   if (players.length < 2) {
-    throw conflict('At least 2 players are required to start');
+    throw badRequest('At least 2 players are required to start');
   }
   if (!players.every((player) => player.placement_done)) {
-    throw conflict('All players must place ships before the game can start');
+    throw badRequest('All players must place ships before the game can start');
   }
 
   await client.query(
@@ -517,28 +526,51 @@ async function startGameNow(client, gameId) {
   );
 
   const refreshed = await getGameWithPlayers(client, gameId);
-  return serializeGame(refreshed.game, refreshed.players);
+  const idMap = await getPlayerIdMap(client);
+  return serializeGame(refreshed.game, refreshed.players, idMap);
 }
 
 async function performMove(client, gameId, body = {}) {
-  const resolvedPlayerId = toUuid(body.player_id ?? body.playerId);
-  const targetPlayerIdParam = toUuid(body.target_player_id ?? body.targetPlayerId);
   const { row, col } = body;
+  const playerRef = body.player_id ?? body.playerId;
+  const targetRef = body.target_player_id ?? body.targetPlayerId;
 
-  if (!resolvedPlayerId) {
-    throw forbidden('Invalid player_id');
+  if (playerRef === undefined) {
+    throw badRequest('player_id is required');
   }
+
+  const playerResolution = await resolvePlayerReference(client, playerRef, {
+    allowNumericString: false,
+    allowUuid: true,
+  });
+  if (playerResolution.malformed || !playerResolution.player) {
+    throw badRequest('Invalid player_id');
+  }
+
+  let targetPlayerIdParam = null;
+  if (targetRef !== undefined) {
+    const targetResolution = await resolvePlayerReference(client, targetRef, {
+      allowNumericString: false,
+      allowUuid: true,
+    });
+    if (targetResolution.malformed || !targetResolution.player) {
+      throw badRequest('Invalid target_player_id');
+    }
+    targetPlayerIdParam = targetResolution.player.id;
+  }
+
   if (!Number.isInteger(row) || !Number.isInteger(col)) {
     throw badRequest('row and col must be integers');
   }
 
+  const resolvedPlayerId = playerResolution.player.id;
   const { game, players } = await getGameWithPlayers(client, gameId);
 
   if (game.status === 'finished') {
-    throw conflict('Game is already finished');
+    throw badRequest('Game is already finished');
   }
   if (game.status !== 'active') {
-    throw forbidden('Game is not active');
+    throw badRequest('Game is not playing');
   }
 
   const membership = players.find((player) => player.player_id === resolvedPlayerId);
@@ -557,7 +589,7 @@ async function performMove(client, gameId, body = {}) {
 
   const targetPlayerId = resolveTargetPlayer(players, resolvedPlayerId, targetPlayerIdParam);
   if (!targetPlayerId) {
-    throw forbidden('No valid target player remains');
+    throw badRequest('No valid target player remains');
   }
 
   const duplicateMove = await client.query(
@@ -580,7 +612,7 @@ async function performMove(client, gameId, body = {}) {
 
   let result = 'miss';
   let hitPlayerId = null;
-  let sunkPlayerId = null;
+  let eliminatedPlayerId = null;
 
   if (shipResult.rowCount > 0) {
     result = 'hit';
@@ -596,7 +628,7 @@ async function performMove(client, gameId, body = {}) {
     );
 
     if (remainingShips.rows[0].remaining === 0) {
-      sunkPlayerId = hitPlayerId;
+      eliminatedPlayerId = hitPlayerId;
       await client.query(
         `UPDATE game_players
          SET eliminated_at = NOW()
@@ -625,7 +657,7 @@ async function performMove(client, gameId, body = {}) {
   const updatedPlayers = refreshed.players;
   const alivePlayers = updatedPlayers.filter((player) => !player.eliminated_at);
 
-  let gameStatus = 'active';
+  let gameStatus = 'playing';
   let winnerId = null;
   let nextTurn = nextAliveTurnOrder(updatedPlayers, membership.turn_order);
 
@@ -651,32 +683,24 @@ async function performMove(client, gameId, body = {}) {
     );
   }
 
+  const idMap = await getPlayerIdMap(client);
   const nextPlayerId =
     nextTurn === null
       ? null
-      : updatedPlayers.find((player) => player.turn_order === nextTurn && !player.eliminated_at)?.player_id || null;
-
-  const nextPlayerUsername =
-    nextPlayerId === null
-      ? null
-      : updatedPlayers.find((player) => player.player_id === nextPlayerId)?.display_name || null;
+      : idMap.get(updatedPlayers.find((player) => player.turn_order === nextTurn && !player.eliminated_at)?.player_id) || null;
 
   return {
-    move_id: moveResult.rows[0].id,
+    move_id: Number(moveResult.rows[0].id),
     result,
-    sunk_player_id: sunkPlayerId,
-    eliminated: sunkPlayerId,
+    eliminated: eliminatedPlayerId ? (idMap.get(eliminatedPlayerId) ?? null) : null,
+    winner_id: winnerId ? (idMap.get(winnerId) ?? null) : null,
     next_player_id: nextPlayerId,
-    next_player_username: nextPlayerUsername,
     game_status: gameStatus,
-    winner_id: winnerId,
-    winner_username:
-      updatedPlayers.find((player) => player.player_id === winnerId)?.display_name || null,
   };
 }
 
 async function resetAllState(client) {
-  await client.query('TRUNCATE TABLE moves, ships, game_players, games, players CASCADE');
+  await client.query('TRUNCATE TABLE moves, ships, game_players, games, players RESTART IDENTITY CASCADE');
 }
 
 async function seedTestState(client) {
@@ -701,57 +725,64 @@ async function seedTestState(client) {
     [players[0].id]
   );
 
-  await client.query(
-    `INSERT INTO game_players (game_id, player_id, turn_order)
-     VALUES ($1, $2, 0), ($1, $3, 1)`,
-    [gameResult.rows[0].id, players[0].id, players[1].id]
-  );
-
+  const idMap = await getPlayerIdMap(client);
   return {
     game_id: Number(gameResult.rows[0].id),
-    player_ids: players.map((player) => player.id),
+    player_ids: players.map((player) => idMap.get(player.id) ?? null),
   };
 }
 
 async function getFullStateSnapshot(client) {
-  const [players, games, gamePlayers, ships, moves] = await Promise.all([
-    client.query('SELECT * FROM players ORDER BY created_at ASC, display_name ASC'),
+  const [players, games, gamePlayers, ships, moves, idMap] = await Promise.all([
+    client.query('SELECT * FROM players ORDER BY created_at ASC, id ASC'),
     client.query('SELECT * FROM games ORDER BY id ASC'),
     client.query('SELECT * FROM game_players ORDER BY game_id ASC, turn_order ASC'),
     client.query('SELECT * FROM ships ORDER BY game_id ASC, player_id ASC, row ASC, col ASC'),
     client.query('SELECT * FROM moves ORDER BY game_id ASC, id ASC'),
+    getPlayerIdMap(client),
   ]);
 
   return {
-    players: players.rows,
-    games: games.rows,
-    game_players: gamePlayers.rows,
-    ships: ships.rows,
-    moves: moves.rows,
+    players: players.rows.map((player) => ({ ...player, player_id: idMap.get(player.id) ?? null })),
+    games: games.rows.map((game) => ({ ...game, status: toPublicStatus(game.status) })),
+    game_players: gamePlayers.rows.map((row) => ({ ...row, player_id: idMap.get(row.player_id) ?? null })),
+    ships: ships.rows.map((row) => ({ ...row, player_id: idMap.get(row.player_id) ?? null })),
+    moves: moves.rows.map((row) => ({
+      ...row,
+      player_id: idMap.get(row.player_id) ?? null,
+      target_player_id: idMap.get(row.target_player_id) ?? null,
+      hit_player_id: row.hit_player_id ? (idMap.get(row.hit_player_id) ?? null) : null,
+    })),
   };
 }
 
 const placeShipsHandler = asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
-  const playerId = toUuid(req.body?.player_id ?? req.body?.playerId);
-
   if (!gameId) {
     throw badRequest('Invalid game id');
   }
-  if (!playerId) {
-    throw badRequest('Invalid player_id');
+  if (req.body?.player_id === undefined && req.body?.playerId === undefined) {
+    throw badRequest('player_id is required');
   }
 
   const client = await pool.connect();
   try {
+    const playerResolution = await resolvePlayerReference(client, req.body?.player_id ?? req.body?.playerId, {
+      allowNumericString: false,
+      allowUuid: true,
+    });
+    if (playerResolution.malformed || !playerResolution.player) {
+      throw badRequest('Invalid player_id');
+    }
+
     await client.query('BEGIN');
-    const game = await placeShips(client, gameId, playerId, req.body?.ships);
+    const game = await placeShips(client, gameId, playerResolution.player.id, req.body?.ships);
     await client.query('COMMIT');
+    const idMap = await getPlayerIdMap(client);
     res.status(200).json({
-      status: 'ships_placed',
       ships_placed: Array.isArray(req.body?.ships) ? req.body.ships.length : 0,
       game_id: gameId,
-      player_id: playerId,
+      player_id: idMap.get(playerResolution.player.id) ?? null,
       game,
     });
   } catch (error) {
@@ -790,7 +821,7 @@ const performMoveHandler = asyncHandler(async (req, res) => {
 
 app.get('/api/health', asyncHandler(async (req, res) => {
   const result = await pool.query('SELECT NOW() AS now');
-  res.json({ status: 'ok', now: result.rows[0].now, test_mode: TEST_MODE });
+  res.json({ status: 'ok', now: result.rows[0].now });
 }));
 
 app.post('/api/reset', asyncHandler(async (req, res) => {
@@ -824,21 +855,24 @@ app.get('/api/test/state', requireTestMode, asyncHandler(async (req, res) => {
 }));
 
 app.post('/api/players', asyncHandler(async (req, res) => {
-  const normalized = normalizeName(req.body);
-  if (!normalized) {
-    throw badRequest('username is required');
-  }
+  const username = validateUsername(req.body?.username);
 
   const client = await pool.connect();
   try {
-    const player = await resolvePlayerIdentity(client, req.body || {}, {
-      rejectClientSuppliedPlayerId: true,
-      allowCreationFromName: true,
-      requireIdentity: true,
-      createErrorMessage: 'username is required',
-    });
+    const existing = await client.query('SELECT 1 FROM players WHERE display_name = $1', [username]);
+    if (existing.rowCount > 0) {
+      throw conflict('Username already exists');
+    }
 
-    res.status(201).json(serializePlayerSummary(player));
+    const inserted = await client.query(
+      `INSERT INTO players (id, display_name)
+       VALUES ($1, $2)
+       RETURNING *`,
+      [crypto.randomUUID(), username]
+    );
+
+    const idMap = await getPlayerIdMap(client);
+    res.status(201).json(serializePlayerSummary(inserted.rows[0], idMap));
   } finally {
     client.release();
   }
@@ -849,17 +883,16 @@ app.get('/api/players', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/players/:id', asyncHandler(async (req, res) => {
-  const playerId = toUuid(req.params.id);
-  if (!playerId) {
+  const { malformed, player } = await resolvePlayerReference(pool, req.params.id, {
+    allowNumericString: true,
+    allowUuid: true,
+  });
+  if (malformed || !player) {
     throw notFound('Player not found');
   }
 
-  const player = await getPlayerById(pool, playerId);
-  if (!player) {
-    throw notFound('Player not found');
-  }
-
-  res.json(serializePlayerSummary(player));
+  const idMap = await getPlayerIdMap(pool);
+  res.json(serializePlayerSummary(player, idMap));
 }));
 
 app.get('/api/players/:id/stats', asyncHandler(async (req, res) => {
@@ -868,60 +901,64 @@ app.get('/api/players/:id/stats', asyncHandler(async (req, res) => {
 }));
 
 app.get('/api/leaderboard', asyncHandler(async (req, res) => {
-  const result = await pool.query(
-    `SELECT *
-     FROM players
-     ORDER BY total_wins DESC, total_hits DESC, total_moves ASC, display_name ASC
-     LIMIT 25`
-  );
+  const client = await pool.connect();
+  try {
+    const [result, idMap] = await Promise.all([
+      client.query(
+        `SELECT *
+         FROM players
+         ORDER BY total_wins DESC, total_hits DESC, total_moves ASC, display_name ASC
+         LIMIT 25`
+      ),
+      getPlayerIdMap(client),
+    ]);
 
-  res.json(result.rows.map((player, index) => ({
-    rank: index + 1,
-    ...serializeStats(player),
-  })));
+    res.json(result.rows.map((player, index) => ({ rank: index + 1, ...serializeStats(player, idMap) })));
+  } finally {
+    client.release();
+  }
 }));
 
 app.post('/api/games', asyncHandler(async (req, res) => {
-  const { grid_size, max_players, is_ai } = req.body || {};
-  const gridSize = Number.isInteger(grid_size) ? grid_size : null;
-  const maxPlayers = max_players === undefined ? null : toPositiveInteger(max_players);
+  const body = req.body || {};
+  const hasRequiredFields = Object.prototype.hasOwnProperty.call(body, 'creator_id')
+    && Object.prototype.hasOwnProperty.call(body, 'grid_size')
+    && Object.prototype.hasOwnProperty.call(body, 'max_players');
 
-  if (!Number.isInteger(gridSize) || gridSize < 5 || gridSize > 15) {
-    throw badRequest('grid_size must be an integer between 5 and 15');
+  if (!hasRequiredFields) {
+    throw badRequest('missing required fields');
   }
-  if (!maxPlayers || maxPlayers < 1 || maxPlayers > 50) {
-    throw badRequest('max_players must be an integer between 1 and 50');
+
+  const gridSize = toBodyPositiveInteger(body.grid_size);
+  const maxPlayers = toBodyPositiveInteger(body.max_players);
+
+  if (!gridSize || gridSize < 5 || gridSize > 15) {
+    throw badRequest('grid_size must be between 5 and 15');
+  }
+  if (!maxPlayers || maxPlayers < 2 || maxPlayers > 50) {
+    throw badRequest('max_players must be at least 2');
   }
 
   const client = await pool.connect();
   try {
-    await client.query('BEGIN');
-
-    const creator = await resolvePlayerIdentity(client, req.body || {}, {
-      allowCreationFromName: true,
-      requireIdentity: true,
-      createErrorMessage: 'creator identity is required',
+    const creatorResolution = await resolvePlayerReference(client, body.creator_id, {
+      allowNumericString: false,
+      allowUuid: true,
     });
+    if (creatorResolution.malformed || !creatorResolution.player) {
+      throw badRequest('creator_id is invalid');
+    }
 
     const gameResult = await client.query(
       `INSERT INTO games (creator_id, grid_size, max_players, status, current_turn_index)
        VALUES ($1, $2, $3, 'waiting', 0)
        RETURNING *`,
-      [creator.id, gridSize, maxPlayers]
+      [creatorResolution.player.id, gridSize, maxPlayers]
     );
 
-    await client.query(
-      `INSERT INTO game_players (game_id, player_id, turn_order, is_ai)
-       VALUES ($1, $2, 0, $3)`,
-      [gameResult.rows[0].id, creator.id, Boolean(is_ai)]
-    );
-
-    const game = await maybeActivateGame(client, gameResult.rows[0].id);
-    await client.query('COMMIT');
+    const idMap = await getPlayerIdMap(client);
+    const game = serializeGame(gameResult.rows[0], [], idMap);
     res.status(201).json(game);
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
   } finally {
     client.release();
   }
@@ -934,7 +971,10 @@ app.get('/api/games', asyncHandler(async (req, res) => {
 app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
   if (!gameId) {
-    throw badRequest('Invalid game id');
+    throw notFound('Game not found');
+  }
+  if (req.body?.player_id === undefined && req.body?.playerId === undefined) {
+    throw badRequest('player_id is required');
   }
 
   const client = await pool.connect();
@@ -942,36 +982,41 @@ app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
     await client.query('BEGIN');
     const { game, players } = await getGameWithPlayers(client, gameId);
 
-    const player = await resolvePlayerIdentity(client, req.body || {}, {
-      allowCreationFromName: true,
-      requireIdentity: true,
-      createErrorMessage: 'player identity is required',
+    const playerResolution = await resolvePlayerReference(client, req.body?.player_id ?? req.body?.playerId, {
+      allowNumericString: false,
+      allowUuid: true,
     });
+    if (playerResolution.malformed) {
+      throw badRequest('Invalid player_id');
+    }
+    if (!playerResolution.player) {
+      throw notFound('player does not exist');
+    }
 
-    if (players.some((member) => member.player_id === player.id)) {
+    if (players.some((member) => member.player_id === playerResolution.player.id)) {
       throw badRequest('Player already joined this game');
     }
     if (game.status !== 'waiting') {
-      throw conflict('Game already started');
+      throw badRequest('Game already started');
     }
     if (players.length >= game.max_players) {
-      throw conflict('Game is full');
+      throw badRequest('Game is full');
     }
 
     await client.query(
       `INSERT INTO game_players (game_id, player_id, turn_order, is_ai)
        VALUES ($1, $2, $3, $4)`,
-      [gameId, player.id, players.length, Boolean(req.body?.is_ai)]
+      [gameId, playerResolution.player.id, players.length, Boolean(req.body?.is_ai)]
     );
 
     const gameState = await maybeActivateGame(client, gameId);
+    const idMap = await getPlayerIdMap(client);
     await client.query('COMMIT');
     res.status(200).json({
-      joined: true,
       game_id: gameId,
-      player_id: player.id,
-      username: player.display_name,
-      status: gameState.status,
+      player_id: idMap.get(playerResolution.player.id) ?? null,
+      status: 'joined',
+      game_status: gameState.status,
       game: gameState,
     });
   } catch (error) {
@@ -988,17 +1033,18 @@ app.post('/api/games/:id/join', asyncHandler(async (req, res) => {
 app.get('/api/games/:id', asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
   if (!gameId) {
-    throw badRequest('Invalid game id');
+    throw notFound('Game not found');
   }
 
   const { game, players } = await getGameWithPlayers(pool, gameId);
-  res.json(serializeGame(game, players));
+  const idMap = await getPlayerIdMap(pool);
+  res.json(serializeGame(game, players, idMap));
 }));
 
 app.post('/api/games/:id/start', asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
   if (!gameId) {
-    throw badRequest('Invalid game id');
+    throw notFound('Game not found');
   }
 
   const client = await pool.connect();
@@ -1020,21 +1066,32 @@ app.post('/api/games/:id/ships', placeShipsHandler);
 
 app.get('/api/games/:id/ships', asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
-  const playerId = toUuid(req.query.player_id || req.query.playerId);
-
   if (!gameId) {
-    throw badRequest('Invalid game id');
+    throw notFound('Game not found');
   }
-  if (!playerId) {
+  if (req.query.player_id === undefined && req.query.playerId === undefined) {
     throw badRequest('player_id query parameter is required');
   }
 
-  const { players } = await getGameWithPlayers(pool, gameId);
-  if (!players.some((player) => player.player_id === playerId)) {
-    throw forbidden('Player is not part of this game');
-  }
+  const client = await pool.connect();
+  try {
+    const playerResolution = await resolvePlayerReference(client, req.query.player_id ?? req.query.playerId, {
+      allowNumericString: true,
+      allowUuid: true,
+    });
+    if (playerResolution.malformed || !playerResolution.player) {
+      throw badRequest('Invalid player_id');
+    }
 
-  res.json(await getShipsForPlayer(pool, gameId, playerId));
+    const { players } = await getGameWithPlayers(client, gameId);
+    if (!players.some((player) => player.player_id === playerResolution.player.id)) {
+      throw forbidden('Player is not part of this game');
+    }
+
+    res.json(await getShipsForPlayer(client, gameId, playerResolution.player.id));
+  } finally {
+    client.release();
+  }
 }));
 
 app.post('/api/games/:id/fire', performMoveHandler);
@@ -1042,7 +1099,7 @@ app.post('/api/games/:id/fire', performMoveHandler);
 app.post('/api/games/:id/moves', asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
   if (!gameId) {
-    throw badRequest('Invalid game id');
+    throw notFound('Game not found');
   }
 
   const client = await pool.connect();
@@ -1051,8 +1108,8 @@ app.post('/api/games/:id/moves', asyncHandler(async (req, res) => {
     const outcome = await performMove(client, gameId, req.body || {});
     await client.query('COMMIT');
     res.json({
-      result: outcome.sunk_player_id ? 'sunk' : outcome.result,
-      eliminated: outcome.sunk_player_id,
+      result: outcome.result,
+      eliminated: outcome.eliminated,
       winner_id: outcome.winner_id,
       next_player_id: outcome.next_player_id,
       game_status: outcome.game_status,
@@ -1072,7 +1129,7 @@ app.post('/api/games/:id/moves', asyncHandler(async (req, res) => {
 app.get('/api/games/:id/moves', asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
   if (!gameId) {
-    throw badRequest('Invalid game id');
+    throw notFound('Game not found');
   }
 
   await getGameWithPlayers(pool, gameId);
@@ -1082,30 +1139,36 @@ app.get('/api/games/:id/moves', asyncHandler(async (req, res) => {
 app.get('/api/games/:id/replay', asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
   if (!gameId) {
-    throw badRequest('Invalid game id');
+    throw notFound('Game not found');
   }
 
-  const { game, players } = await getGameWithPlayers(pool, gameId);
-  const [moves, shipsByPlayer] = await Promise.all([
-    getMovesForGame(pool, gameId),
-    Promise.all(players.map(async (player) => ({
-      player_id: player.player_id,
-      username: player.display_name,
-      ships: await getShipsForPlayer(pool, gameId, player.player_id),
-    }))),
-  ]);
+  const client = await pool.connect();
+  try {
+    const { game, players } = await getGameWithPlayers(client, gameId);
+    const idMap = await getPlayerIdMap(client);
+    const [moves, shipsByPlayer] = await Promise.all([
+      getMovesForGame(client, gameId),
+      Promise.all(players.map(async (player) => ({
+        player_id: idMap.get(player.player_id) ?? null,
+        username: player.display_name,
+        ships: await getShipsForPlayer(client, gameId, player.player_id),
+      }))),
+    ]);
 
-  res.json({
-    game: serializeGame(game, players),
-    players: shipsByPlayer,
-    moves,
-  });
+    res.json({
+      game: serializeGame(game, players, idMap),
+      players: shipsByPlayer,
+      moves,
+    });
+  } finally {
+    client.release();
+  }
 }));
 
 app.post('/api/test/games/:id/restart', requireTestMode, asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
   if (!gameId) {
-    throw badRequest('Invalid game id');
+    throw notFound('Game not found');
   }
 
   const client = await pool.connect();
@@ -1130,7 +1193,7 @@ app.post('/api/test/games/:id/restart', requireTestMode, asyncHandler(async (req
     );
 
     await client.query('COMMIT');
-    res.json({ status: 'restarted', game_id: gameId });
+    res.json({ status: 'reset', game_id: gameId });
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -1141,20 +1204,26 @@ app.post('/api/test/games/:id/restart', requireTestMode, asyncHandler(async (req
 
 app.post('/api/test/games/:id/ships', requireTestMode, asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
-  const playerId = toUuid(req.body?.player_id ?? req.body?.playerId);
-
   if (!gameId) {
-    throw badRequest('Invalid game id');
+    throw notFound('Game not found');
   }
-  if (!playerId) {
-    throw badRequest('Invalid player_id');
+  if (req.body?.player_id === undefined && req.body?.playerId === undefined) {
+    throw badRequest('player_id is required');
   }
 
   const client = await pool.connect();
   try {
+    const playerResolution = await resolvePlayerReference(client, req.body?.player_id ?? req.body?.playerId, {
+      allowNumericString: false,
+      allowUuid: true,
+    });
+    if (playerResolution.malformed || !playerResolution.player) {
+      throw badRequest('Invalid player_id');
+    }
+
     await client.query('BEGIN');
     const { game, players } = await getGameWithPlayers(client, gameId);
-    const membership = players.find((player) => player.player_id === playerId);
+    const membership = players.find((player) => player.player_id === playerResolution.player.id);
 
     if (!membership) {
       throw badRequest('Player is not part of this game');
@@ -1162,13 +1231,13 @@ app.post('/api/test/games/:id/ships', requireTestMode, asyncHandler(async (req, 
 
     validateCoordinates(req.body?.ships, game.grid_size);
 
-    await client.query('DELETE FROM ships WHERE game_id = $1 AND player_id = $2', [gameId, playerId]);
+    await client.query('DELETE FROM ships WHERE game_id = $1 AND player_id = $2', [gameId, playerResolution.player.id]);
 
     for (const ship of req.body.ships) {
       await client.query(
         `INSERT INTO ships (game_id, player_id, row, col)
          VALUES ($1, $2, $3, $4)`,
-        [gameId, playerId, ship.row, ship.col]
+        [gameId, playerResolution.player.id, ship.row, ship.col]
       );
     }
 
@@ -1177,13 +1246,14 @@ app.post('/api/test/games/:id/ships', requireTestMode, asyncHandler(async (req, 
        SET placement_done = true,
            eliminated_at = NULL
        WHERE game_id = $1 AND player_id = $2`,
-      [gameId, playerId]
+      [gameId, playerResolution.player.id]
     );
 
     const gameState = await maybeActivateGame(client, gameId);
+    const idMap = await getPlayerIdMap(client);
     await client.query('COMMIT');
 
-    res.json({ status: 'ships_set', player_id: playerId, game: gameState });
+    res.json({ status: 'ships_set', player_id: idMap.get(playerResolution.player.id) ?? null, game: gameState });
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -1194,53 +1264,67 @@ app.post('/api/test/games/:id/ships', requireTestMode, asyncHandler(async (req, 
 
 app.get('/api/test/games/:id/board/:playerId', requireTestMode, asyncHandler(async (req, res) => {
   const gameId = toPositiveInteger(req.params.id);
-  const playerId = toUuid(req.params.playerId);
-
   if (!gameId) {
-    throw badRequest('Invalid game id');
-  }
-  if (!playerId) {
-    throw badRequest('Invalid player_id');
+    throw notFound('Game not found');
   }
 
-  const { game, players } = await getGameWithPlayers(pool, gameId);
-  const membership = players.find((player) => player.player_id === playerId);
+  const client = await pool.connect();
+  try {
+    const playerResolution = await resolvePlayerReference(client, req.params.playerId, {
+      allowNumericString: true,
+      allowUuid: true,
+    });
+    if (playerResolution.malformed || !playerResolution.player) {
+      throw badRequest('Invalid player_id');
+    }
 
-  if (!membership) {
-    throw badRequest('Player is not part of this game');
+    const { game, players } = await getGameWithPlayers(client, gameId);
+    const membership = players.find((player) => player.player_id === playerResolution.player.id);
+    if (!membership) {
+      throw badRequest('Player is not part of this game');
+    }
+
+    const [ships, moves, idMap] = await Promise.all([
+      client.query(
+        `SELECT row, col, destroyed_at
+         FROM ships
+         WHERE game_id = $1 AND player_id = $2
+         ORDER BY row ASC, col ASC`,
+        [gameId, playerResolution.player.id]
+      ),
+      client.query(
+        `SELECT row, col, result, player_id, target_player_id, hit_player_id
+         FROM moves
+         WHERE game_id = $1
+         ORDER BY id ASC`,
+        [gameId]
+      ),
+      getPlayerIdMap(client),
+    ]);
+
+    res.json({
+      game_id: gameId,
+      grid_size: Number(game.grid_size),
+      player_id: idMap.get(playerResolution.player.id) ?? null,
+      ships: ships.rows.map((ship) => ({
+        row: ship.row,
+        col: ship.col,
+        destroyed: Boolean(ship.destroyed_at),
+      })),
+      moves: moves.rows.map((row) => ({
+        ...row,
+        player_id: idMap.get(row.player_id) ?? null,
+        target_player_id: idMap.get(row.target_player_id) ?? null,
+        hit_player_id: row.hit_player_id ? (idMap.get(row.hit_player_id) ?? null) : null,
+      })),
+    });
+  } finally {
+    client.release();
   }
-
-  const ships = await pool.query(
-    `SELECT row, col, destroyed_at
-     FROM ships
-     WHERE game_id = $1 AND player_id = $2
-     ORDER BY row ASC, col ASC`,
-    [gameId, playerId]
-  );
-
-  const moves = await pool.query(
-    `SELECT row, col, result, player_id, target_player_id, hit_player_id
-     FROM moves
-     WHERE game_id = $1
-     ORDER BY id ASC`,
-    [gameId]
-  );
-
-  res.json({
-    game_id: gameId,
-    grid_size: game.grid_size,
-    player_id: playerId,
-    ships: ships.rows.map((ship) => ({
-      row: ship.row,
-      col: ship.col,
-      destroyed: Boolean(ship.destroyed_at),
-    })),
-    moves: moves.rows,
-  });
 }));
 
 app.use((req, res) => {
-  res.status(404).json({ error: 'Not found' });
+  res.status(404).json({ error: 'not_found', message: 'Not found' });
 });
 
 app.use((err, req, res, next) => {
@@ -1248,7 +1332,21 @@ app.use((err, req, res, next) => {
   if (status >= 500) {
     console.error(err);
   }
-  res.status(status).json({ error: err.message || 'Internal server error' });
+
+  const errorCode = err.code || (status === 400
+    ? 'bad_request'
+    : status === 403
+      ? 'forbidden'
+      : status === 404
+        ? 'not_found'
+        : status === 409
+          ? 'conflict'
+          : 'internal_server_error');
+
+  res.status(status).json({
+    error: errorCode,
+    message: err.message || 'Internal server error',
+  });
 });
 
 module.exports = app;
