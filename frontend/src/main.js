@@ -1,39 +1,45 @@
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
-const STORAGE_KEY = 'battleship-vanilla-state';
+const STORAGE_KEY = 'battleship-phase2-state';
 
 const state = {
   username: '',
   playerId: null,
-  gameId: null,
-  game: null,
-  stats: null,
-  moves: [],
+  activeGameId: null,
+  currentGame: null,
+  myStats: null,
   myShips: [],
-  placingShips: [],
-  loading: false,
+  pendingShips: [],
+  moveHistory: [],
+  games: [],
+  leaderboard: [],
   error: '',
   success: '',
   pollHandle: null,
+  busy: false,
 };
 
 loadLocalState();
 bootstrap();
 
 function bootstrap() {
-  render();
   attachGlobalEvents();
+  render();
 
-  if (state.playerId) {
-    refreshStats().catch(() => {});
-  }
-  if (state.gameId) {
-    refreshGame(true).catch(() => {});
-    startPolling();
-  }
+  Promise.allSettled([
+    refreshLobby(),
+    refreshLeaderboard(),
+    state.playerId ? refreshStats() : Promise.resolve(),
+    state.activeGameId ? refreshCurrentGame(true) : Promise.resolve(),
+  ]).finally(() => {
+    if (state.activeGameId) {
+      startPolling();
+    }
+  });
 }
+
 function attachGlobalEvents() {
-  document.addEventListener('click', handleClick);
   document.addEventListener('submit', handleSubmit);
+  document.addEventListener('click', handleClick);
   document.addEventListener('change', handleChange);
 }
 
@@ -52,13 +58,13 @@ async function handleSubmit(event) {
 
   try {
     if (form.id === 'player-form') {
-      await createPlayer(new FormData(form));
+      await createOrLoadPlayer(new FormData(form));
     }
     if (form.id === 'create-game-form') {
       await createGame(new FormData(form));
     }
-    if (form.id === 'join-game-form') {
-      await joinGame(new FormData(form));
+    if (form.id === 'join-by-id-form') {
+      await joinGameByForm(new FormData(form));
     }
   } catch (error) {
     showError(error.message);
@@ -67,46 +73,88 @@ async function handleSubmit(event) {
 
 async function handleClick(event) {
   const target = event.target.closest('[data-action]');
-  if (!target) return;
+  if (!target) {
+    return;
+  }
 
-  const action = target.dataset.action;
   clearMessages();
 
   try {
+    const action = target.dataset.action;
+
     if (action === 'clear-session') {
       stopPolling();
       clearState();
       render();
+      await refreshLobby();
+      await refreshLeaderboard();
       return;
     }
 
-    if (action === 'refresh-game') {
-      await refreshGame(true);
+    if (action === 'refresh-all') {
+      await refreshAll();
       return;
     }
 
-    if (action === 'cell-place') {
-      const row = Number(target.dataset.row);
-      const col = Number(target.dataset.col);
-      toggleShipPlacement(row, col);
+    if (action === 'join-game') {
+      await joinGame(Number(target.dataset.gameId));
       return;
     }
 
-    if (action === 'submit-placement') {
-      await submitPlacement();
+    if (action === 'open-game') {
+      const nextGameId = Number(target.dataset.gameId);
+      if (state.activeGameId !== nextGameId) {
+        state.myShips = [];
+        state.pendingShips = [];
+        state.moveHistory = [];
+      }
+      state.activeGameId = nextGameId;
+      persistLocalState();
+      await refreshCurrentGame(true);
+      startPolling();
+      showSuccess(`Opened game ${state.activeGameId}`);
       return;
     }
 
-    if (action === 'clear-placement') {
-      state.placingShips = [];
+    if (action === 'leave-current-game') {
+      stopPolling();
+      state.activeGameId = null;
+      state.currentGame = null;
+      state.myShips = [];
+      state.pendingShips = [];
+      state.moveHistory = [];
+      persistLocalState();
       render();
       return;
     }
 
-    if (action === 'cell-fire') {
-      const row = Number(target.dataset.row);
-      const col = Number(target.dataset.col);
-      await fireShot(row, col);
+    if (action === 'toggle-ship-cell') {
+      togglePendingShip(Number(target.dataset.row), Number(target.dataset.col));
+      return;
+    }
+
+    if (action === 'clear-pending-ships') {
+      state.pendingShips = [];
+      render();
+      return;
+    }
+
+    if (action === 'submit-ships') {
+      await submitShips();
+      return;
+    }
+
+    if (action === 'start-game') {
+      await startCurrentGame();
+      return;
+    }
+
+    if (action === 'fire-shot') {
+      await fireShot(
+        Number(target.dataset.row),
+        Number(target.dataset.col),
+        target.dataset.targetPlayerId
+      );
       return;
     }
   } catch (error) {
@@ -114,15 +162,28 @@ async function handleClick(event) {
   }
 }
 
+async function refreshAll() {
+  await refreshLobby();
+  await refreshLeaderboard();
+  if (state.playerId) {
+    await refreshStats();
+  }
+  if (state.activeGameId) {
+    await refreshCurrentGame(true);
+  } else {
+    render();
+  }
+}
+
 function clearState() {
   state.username = '';
   state.playerId = null;
-  state.gameId = null;
-  state.game = null;
-  state.stats = null;
-  state.moves = [];
+  state.activeGameId = null;
+  state.currentGame = null;
+  state.myStats = null;
   state.myShips = [];
-  state.placingShips = [];
+  state.pendingShips = [];
+  state.moveHistory = [];
   state.error = '';
   state.success = '';
   localStorage.removeItem(STORAGE_KEY);
@@ -134,8 +195,8 @@ function persistLocalState() {
     JSON.stringify({
       username: state.username,
       playerId: state.playerId,
-      gameId: state.gameId,
-      myShips: state.myShips,
+      activeGameId: state.activeGameId,
+      pendingShips: state.pendingShips,
     })
   );
 }
@@ -143,12 +204,14 @@ function persistLocalState() {
 function loadLocalState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
+    if (!raw) {
+      return;
+    }
     const parsed = JSON.parse(raw);
     state.username = parsed.username || '';
     state.playerId = parsed.playerId || null;
-    state.gameId = parsed.gameId || null;
-    state.myShips = Array.isArray(parsed.myShips) ? parsed.myShips : [];
+    state.activeGameId = parsed.activeGameId || null;
+    state.pendingShips = Array.isArray(parsed.pendingShips) ? parsed.pendingShips : [];
   } catch {
     localStorage.removeItem(STORAGE_KEY);
   }
@@ -160,7 +223,7 @@ function clearMessages() {
 }
 
 function showError(message) {
-  state.error = message;
+  state.error = humanizeError(message);
   state.success = '';
   render();
 }
@@ -171,9 +234,28 @@ function showSuccess(message) {
   render();
 }
 
+function humanizeError(message) {
+  const normalized = String(message || 'Something went wrong').trim();
+
+  if (/not this player's turn|not your turn/i.test(normalized)) {
+    return 'It is not your turn yet.';
+  }
+  if (/already been fired upon|already fired/i.test(normalized)) {
+    return 'That square was already targeted.';
+  }
+  if (/game is not active/i.test(normalized)) {
+    return 'The game has not started yet.';
+  }
+  if (/all players must place ships/i.test(normalized)) {
+    return 'Everyone has to place ships before the game can start.';
+  }
+
+  return normalized;
+}
+
 async function api(path, options = {}) {
   if (!API_BASE_URL) {
-    throw new Error('Missing VITE_API_BASE_URL in your frontend environment');
+    throw new Error('Missing VITE_API_BASE_URL in the frontend environment');
   }
 
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -199,22 +281,126 @@ async function api(path, options = {}) {
   return data;
 }
 
-async function createPlayer(formData) {
+function normalizePlayerResponse(payload) {
+  return {
+    id: payload?.player_id || payload?.id || null,
+    username: payload?.username || payload?.display_name || state.username || '',
+  };
+}
+
+function normalizeStats(stats) {
+  if (!stats) {
+    return null;
+  }
+  const shots = Number(stats.total_shots ?? stats.shots_fired ?? 0);
+  const hits = Number(stats.total_hits ?? stats.hits ?? 0);
+  return {
+    id: stats.player_id || stats.id || null,
+    username: stats.username || stats.display_name || '',
+    games_played: Number(stats.games_played || 0),
+    wins: Number(stats.wins || 0),
+    losses: Number(stats.losses || 0),
+    total_shots: shots,
+    total_hits: hits,
+    accuracy: Number(stats.accuracy || 0),
+  };
+}
+
+function normalizeGame(raw) {
+  if (!raw) {
+    return null;
+  }
+
+  const players = Array.isArray(raw.players)
+    ? raw.players.map((player) => ({
+        id: player.player_id || player.id,
+        player_id: player.player_id || player.id,
+        username: player.username || player.display_name || 'Unknown',
+        display_name: player.display_name || player.username || 'Unknown',
+        turn_order: Number(player.turn_order || 0),
+        placement_done: Boolean(player.placement_done),
+        eliminated: Boolean(player.eliminated),
+        eliminated_at: player.eliminated_at || null,
+      }))
+    : [];
+
+  const currentPlayerId = raw.current_player_id || raw.current_turn || null;
+  const currentPlayer = players.find((player) => player.player_id === currentPlayerId) || null;
+  const winnerPlayer = players.find((player) => player.player_id === raw.winner_id) || null;
+
+  return {
+    id: Number(raw.game_id || raw.id),
+    game_id: Number(raw.game_id || raw.id),
+    status: raw.status || 'waiting',
+    grid_size: Number(raw.grid_size || 8),
+    max_players: Number(raw.max_players || players.length || 2),
+    player_count: Number(raw.player_count || players.length),
+    current_turn_index: Number(raw.current_turn_index || 0),
+    current_player_id: currentPlayerId,
+    current_player_username:
+      raw.current_player_username || currentPlayer?.username || currentPlayer?.display_name || null,
+    winner_id: raw.winner_id || null,
+    winner_username:
+      raw.winner_username || winnerPlayer?.username || winnerPlayer?.display_name || null,
+    players,
+  };
+}
+
+function normalizeGameList(rawGames) {
+  if (!Array.isArray(rawGames)) {
+    return [];
+  }
+
+  return rawGames.map((game) => ({
+    id: Number(game.game_id || game.id),
+    game_id: Number(game.game_id || game.id),
+    status: game.status || 'waiting',
+    grid_size: Number(game.grid_size || 8),
+    max_players: Number(game.max_players || 2),
+    player_count: Number(game.player_count || 0),
+    open_seats: Math.max(0, Number(game.max_players || 2) - Number(game.player_count || 0)),
+    winner_id: game.winner_id || null,
+    created_at: game.created_at || null,
+  }));
+}
+
+function normalizeMoves(raw) {
+  const source = Array.isArray(raw) ? raw : Array.isArray(raw?.moves) ? raw.moves : [];
+
+  return source.map((move) => ({
+    move_id: move.move_id || move.id || null,
+    player_id: move.player_id,
+    username: move.username || move.display_name || 'Unknown',
+    target_player_id: move.target_player_id || null,
+    target_username: move.target_username || null,
+    row: Number(move.row),
+    col: Number(move.col),
+    result: move.result,
+    hit_player_id: move.hit_player_id || null,
+    hit_username: move.hit_username || null,
+    created_at: move.created_at || move.timestamp || null,
+  }));
+}
+
+async function createOrLoadPlayer(formData) {
   const username = String(formData.get('username') || '').trim();
   if (!username) {
     throw new Error('Enter a username first');
   }
 
-  const result = await api('/api/players', {
-    method: 'POST',
-    body: JSON.stringify({ username }),
-  });
+  const result = normalizePlayerResponse(
+    await api('/api/players', {
+      method: 'POST',
+      body: JSON.stringify({ username }),
+    })
+  );
 
-  state.username = username;
-  state.playerId = result.player_id;
+  state.username = result.username || username;
+  state.playerId = result.id;
   persistLocalState();
   await refreshStats();
-  showSuccess(`Player ready: ${username} (ID ${result.player_id})`);
+  await refreshLeaderboard();
+  showSuccess(`Player ready: ${state.username}`);
 }
 
 async function createGame(formData) {
@@ -223,35 +409,39 @@ async function createGame(formData) {
   const gridSize = Number(formData.get('grid_size'));
   const maxPlayers = Number(formData.get('max_players'));
 
-  const game = await api('/api/games', {
+  const rawGame = await api('/api/games', {
     method: 'POST',
     body: JSON.stringify({
       creator_id: state.playerId,
+      username: state.username,
       grid_size: gridSize,
       max_players: maxPlayers,
     }),
   });
 
-  state.gameId = game.game_id;
-  state.game = game;
-  state.moves = [];
+  state.activeGameId = Number(rawGame.game_id || rawGame.id);
+  state.currentGame = normalizeGame(rawGame);
   state.myShips = [];
-  state.placingShips = [];
+  state.pendingShips = [];
+  state.moveHistory = [];
   persistLocalState();
   startPolling();
-  await refreshGame(true);
-  showSuccess(`Game ${game.game_id} created`);
+  await refreshAll();
+  showSuccess(`Game ${state.activeGameId} created`);
 }
 
-async function joinGame(formData) {
-  ensurePlayerReady();
-
+async function joinGameByForm(formData) {
   const gameId = Number(formData.get('game_id'));
   if (!Number.isInteger(gameId) || gameId <= 0) {
     throw new Error('Enter a valid game ID');
   }
+  await joinGame(gameId);
+}
 
-  const result = await api(`/api/games/${gameId}/join`, {
+async function joinGame(gameId) {
+  ensurePlayerReady();
+
+  await api(`/api/games/${gameId}/join`, {
     method: 'POST',
     body: JSON.stringify({
       player_id: state.playerId,
@@ -259,50 +449,79 @@ async function joinGame(formData) {
     }),
   });
 
-  state.gameId = gameId;
-  state.game = result.game;
-  state.moves = [];
+  state.activeGameId = gameId;
   state.myShips = [];
-  state.placingShips = [];
+  state.pendingShips = [];
+  state.moveHistory = [];
   persistLocalState();
   startPolling();
-  await refreshGame(true);
+  await refreshAll();
   showSuccess(`Joined game ${gameId}`);
 }
 
-async function refreshStats() {
-  if (!state.playerId) return;
-  state.stats = await api(`/api/players/${state.playerId}/stats`);
+async function refreshLobby() {
+  state.games = normalizeGameList(await api('/api/games'));
   render();
 }
 
-async function refreshGame(fetchMoves = false) {
-  if (!state.gameId) return;
+async function refreshLeaderboard() {
+  try {
+    state.leaderboard = (await api('/api/leaderboard')).map((row) => ({
+      rank: Number(row.rank || 0),
+      ...normalizeStats(row),
+    }));
+  } catch {
+    state.leaderboard = [];
+  }
+  render();
+}
 
-  const game = await api(`/api/games/${state.gameId}`);
-  state.game = game;
-
-  const me = game.players.find((player) => player.player_id === state.playerId);
-  const placementDone = Boolean(me?.placement_done);
-  if (placementDone && state.myShips.length === 0 && state.placingShips.length === 3) {
-    state.myShips = [...state.placingShips];
-    persistLocalState();
+async function refreshStats() {
+  if (!state.playerId) {
+    return;
   }
 
-  if (fetchMoves) {
-    const movesResult = await api(`/api/games/${state.gameId}/moves`);
-    state.moves = movesResult.moves || [];
+  state.myStats = normalizeStats(await api(`/api/players/${state.playerId}/stats`));
+  render();
+}
+
+async function refreshCurrentGame(includeMoves = false) {
+  if (!state.activeGameId) {
+    return;
   }
 
+  state.currentGame = normalizeGame(await api(`/api/games/${state.activeGameId}`));
+
+  if (state.playerId) {
+    try {
+      state.myShips = await api(`/api/games/${state.activeGameId}/ships?player_id=${encodeURIComponent(state.playerId)}`);
+    } catch {
+      state.myShips = [];
+    }
+  }
+
+  if (includeMoves) {
+    state.moveHistory = normalizeMoves(await api(`/api/games/${state.activeGameId}/moves`));
+  }
+
+  if (state.currentGame?.status === 'finished') {
+    stopPolling();
+  }
+
+  persistLocalState();
   render();
 }
 
 function startPolling() {
   stopPolling();
   state.pollHandle = window.setInterval(() => {
-    refreshGame(true).catch(() => {});
-    refreshStats().catch(() => {});
-  }, 2000);
+    Promise.allSettled([
+      refreshLobby(),
+      refreshLeaderboard(),
+      state.playerId ? refreshStats() : Promise.resolve(),
+      state.activeGameId ? refreshCurrentGame(true) : Promise.resolve(),
+    ]);
+  }, 2500);
 }
 
 function stopPolling() {
@@ -312,122 +531,149 @@ function stopPolling() {
   }
 }
 
-function toggleShipPlacement(row, col) {
-  ensurePlayerReady();
-  ensureGameSelected();
-
-  if (placementAlreadySubmitted()) {
-    throw new Error('You already placed your ships for this game');
-  }
-
-  const existingIndex = state.placingShips.findIndex((ship) => ship.row === row && ship.col === col);
-  if (existingIndex >= 0) {
-    state.placingShips.splice(existingIndex, 1);
-    render();
-    return;
-  }
-
-  if (state.placingShips.length >= 3) {
-    throw new Error('You can only choose exactly 3 ship cells');
-  }
-
-  state.placingShips.push({ row, col });
-  render();
-}
-
-async function submitPlacement() {
-  ensurePlayerReady();
-  ensureGameSelected();
-
-  if (state.placingShips.length !== 3) {
-    throw new Error('Pick exactly 3 cells for your ships');
-  }
-
-  await api(`/api/games/${state.gameId}/place`, {
-    method: 'POST',
-    body: JSON.stringify({
-      player_id: state.playerId,
-      ships: state.placingShips,
-    }),
-  });
-
-  state.myShips = [...state.placingShips];
-  persistLocalState();
-  await refreshGame(true);
-  showSuccess('Ships placed successfully');
-}
-
-async function fireShot(row, col) {
-  ensurePlayerReady();
-  ensureGameSelected();
-
-  if (!canFireAt(row, col)) {
-    throw new Error('That cell cannot be fired on right now');
-  }
-
-  const result = await api(`/api/games/${state.gameId}/fire`, {
-    method: 'POST',
-    body: JSON.stringify({
-      player_id: state.playerId,
-      row,
-      col,
-    }),
-  });
-
-  await refreshGame(true);
-  await refreshStats();
-
-  if (result.game_status === 'finished') {
-    if (result.winner_id === state.playerId) {
-      showSuccess('You won the game');
-    } else {
-      showSuccess(`Game over. Winner ID: ${result.winner_id}`);
-    }
-  } else if (result.result === 'hit') {
-    showSuccess('Hit');
-  } else {
-    showSuccess('Miss');
-  }
-}
-
 function ensurePlayerReady() {
   if (!state.playerId) {
     throw new Error('Create a player first');
   }
 }
 
-function ensureGameSelected() {
-  if (!state.gameId) {
-    throw new Error('Create or join a game first');
+function ensureCurrentGame() {
+  if (!state.activeGameId || !state.currentGame) {
+    throw new Error('Open or join a game first');
   }
 }
 
 function getCurrentPlayer() {
-  return state.game?.players?.find((player) => player.player_id === state.playerId) || null;
+  return state.currentGame?.players?.find((player) => player.player_id === state.playerId) || null;
 }
 
-function placementAlreadySubmitted() {
-  return Boolean(getCurrentPlayer()?.placement_done);
+function currentPlayerNameById(playerId) {
+  return state.currentGame?.players?.find((player) => player.player_id === playerId)?.username || playerId;
 }
 
 function isMyTurn() {
-  return state.game?.current_player_id === state.playerId && state.game?.status === 'active';
+  return state.currentGame?.status === 'active' && state.currentGame.current_player_id === state.playerId;
 }
 
-function wasShotAt(row, col) {
-  return state.moves.some((move) => move.row === row && move.col === col);
+function myPlacementSubmitted() {
+  return Boolean(getCurrentPlayer()?.placement_done);
 }
 
-function moveAt(row, col) {
-  return state.moves.find((move) => move.row === row && move.col === col) || null;
+function canStartCurrentGame() {
+  if (!state.currentGame || state.currentGame.status !== 'waiting') {
+    return false;
+  }
+  return state.currentGame.players.length >= 2 && state.currentGame.players.every((player) => player.placement_done);
 }
 
-function canFireAt(row, col) {
-  return isMyTurn() && !wasShotAt(row, col);
+function togglePendingShip(row, col) {
+  ensurePlayerReady();
+  ensureCurrentGame();
+
+  if (!getCurrentPlayer()) {
+    throw new Error('Join this game before placing ships');
+  }
+
+  if (myPlacementSubmitted()) {
+    throw new Error('Your ships are already placed for this game');
+  }
+
+  const existingIndex = state.pendingShips.findIndex((ship) => ship.row === row && ship.col === col);
+  if (existingIndex >= 0) {
+    state.pendingShips.splice(existingIndex, 1);
+    persistLocalState();
+    render();
+    return;
+  }
+
+  if (state.pendingShips.length >= 3) {
+    throw new Error('Choose exactly 3 ship cells');
+  }
+
+  state.pendingShips.push({ row, col });
+  persistLocalState();
+  render();
 }
 
-function getGridSize() {
-  return state.game?.grid_size || 8;
+async function submitShips() {
+  ensurePlayerReady();
+  ensureCurrentGame();
+
+  if (state.pendingShips.length !== 3) {
+    throw new Error('Choose exactly 3 ship cells first');
+  }
+
+  await api(`/api/games/${state.activeGameId}/ships`, {
+    method: 'POST',
+    body: JSON.stringify({
+      player_id: state.playerId,
+      ships: state.pendingShips,
+    }),
+  });
+
+  state.myShips = [...state.pendingShips];
+  state.pendingShips = [];
+  persistLocalState();
+  await refreshAll();
+  showSuccess('Ships placed successfully');
+}
+
+async function startCurrentGame() {
+  ensureCurrentGame();
+  await api(`/api/games/${state.activeGameId}/start`, { method: 'POST', body: JSON.stringify({}) });
+  await refreshAll();
+  showSuccess('Game started');
+}
+
+function boardMovesForTarget(targetPlayerId) {
+  return state.moveHistory.filter((move) => move.target_player_id === targetPlayerId);
+}
+
+function moveAtForTarget(targetPlayerId, row, col) {
+  return boardMovesForTarget(targetPlayerId).find((move) => move.row === row && move.col === col) || null;
+}
+
+function canFireAt(targetPlayerId, row, col) {
+  const opponent = state.currentGame?.players?.find((player) => player.player_id === targetPlayerId);
+  return Boolean(
+    isMyTurn() &&
+      opponent &&
+      !opponent.eliminated &&
+      !moveAtForTarget(targetPlayerId, row, col)
+  );
+}
+
+async function fireShot(row, col, targetPlayerId) {
+  ensurePlayerReady();
+  ensureCurrentGame();
+
+  if (!canFireAt(targetPlayerId, row, col)) {
+    throw new Error('That square cannot be targeted right now');
+  }
+
+  const result = await api(`/api/games/${state.activeGameId}/moves`, {
+    method: 'POST',
+    body: JSON.stringify({
+      player_id: state.playerId,
+      target_player_id: targetPlayerId,
+      row,
+      col,
+    }),
+  });
+
+  await refreshAll();
+
+  if (result.winner_id) {
+    showSuccess(`Winner: ${currentPlayerNameById(result.winner_id)}`);
+    return;
+  }
+
+  if (result.result === 'sunk' && result.eliminated) {
+    showSuccess(`${currentPlayerNameById(result.eliminated)} has been eliminated`);
+    return;
+  }
+
+  showSuccess(result.result === 'hit' ? 'Hit' : 'Miss');
 }
 
 function render() {
@@ -435,16 +681,17 @@ function render() {
   app.innerHTML = `
     <section class="hero">
       <div>
+        <div class="eyebrow">Phase 2 client</div>
         <h1>Battleship Arena</h1>
-        <p>Plain JavaScript frontend for your Render backend.</p>
+        <p>Lobby, multi-board battle view, live polling, move timeline, and leaderboard.</p>
       </div>
       <div class="actions">
-        <button class="secondary" data-action="refresh-game" ${state.gameId ? '' : 'disabled'}>Refresh</button>
+        <button class="secondary" data-action="refresh-all">Refresh</button>
         <button class="ghost" data-action="clear-session">Clear Session</button>
       </div>
     </section>
 
-    ${renderMessages()}
+    ${renderBanner()}
 
     <div class="layout">
       <aside class="stack">
@@ -457,21 +704,20 @@ function render() {
             </label>
             <button type="submit">Create / Load Player</button>
           </form>
-
           <div class="info-grid">
-            <div class="stat"><div class="label">Player ID</div><div class="value">${state.playerId ?? '—'}</div></div>
-            <div class="stat"><div class="label">Current Game</div><div class="value">${state.gameId ?? '—'}</div></div>
+            <div class="stat"><div class="label">Player ID</div><div class="value wrap">${escapeHtml(state.playerId || '—')}</div></div>
+            <div class="stat"><div class="label">Active Game</div><div class="value">${escapeHtml(state.activeGameId || '—')}</div></div>
           </div>
         </section>
 
         <section class="panel stack">
-          <h2>Game Setup</h2>
+          <h2>Create Game</h2>
           <form id="create-game-form" class="stack">
             <div class="row">
               <label>
                 Grid Size
                 <select name="grid_size">
-                  ${[5, 6, 7, 8, 9, 10].map((n) => `<option value="${n}" ${n === 8 ? 'selected' : ''}>${n} x ${n}</option>`).join('')}
+                  ${[5, 6, 7, 8, 9, 10].map((n) => `<option value="${n}" ${n === 8 ? 'selected' : ''}>${n} × ${n}</option>`).join('')}
                 </select>
               </label>
               <label>
@@ -483,48 +729,77 @@ function render() {
             </div>
             <button type="submit">Create Game</button>
           </form>
+        </section>
 
-          <form id="join-game-form" class="stack">
+        <section class="panel stack">
+          <div class="section-head">
+            <h2>Open Games</h2>
+            <span class="badge">${state.games.filter((game) => game.status === 'waiting').length} waiting</span>
+          </div>
+          <form id="join-by-id-form" class="stack compact-form">
             <label>
-              Join Existing Game ID
+              Join by Game ID
               <input name="game_id" type="number" min="1" placeholder="Game ID" />
             </label>
-            <button type="submit" class="secondary">Join Game</button>
+            <button type="submit" class="secondary">Join</button>
           </form>
+          ${renderLobbyGames()}
         </section>
 
         <section class="panel stack">
-          <h2>Stats</h2>
-          ${renderStats()}
+          <h2>Your Stats</h2>
+          ${renderMyStats()}
         </section>
 
         <section class="panel stack">
-          <h2>Players</h2>
-          ${renderPlayers()}
+          <div class="section-head">
+            <h2>Leaderboard</h2>
+            <span class="badge">Top ${state.leaderboard.length || 0}</span>
+          </div>
+          ${renderLeaderboard()}
         </section>
       </aside>
 
       <main class="stack">
         <section class="panel stack">
-          <div class="main-grid">
-            ${renderPlacementBoard()}
-            ${renderTargetBoard()}
+          <div class="section-head">
+            <h2>Current Game</h2>
+            ${state.currentGame ? `<button class="ghost" data-action="leave-current-game">Close Game View</button>` : ''}
           </div>
+          ${renderCurrentGameSummary()}
         </section>
 
-        <section class="panel stack">
-          <div class="board-head">
-            <h2>Move Log</h2>
-            <span class="badge">${state.moves.length} moves</span>
-          </div>
-          ${renderMoves()}
-        </section>
+        ${state.currentGame ? `
+          <section class="panel stack">
+            <div class="section-head">
+              <h2>Boards</h2>
+              <span class="badge ${isMyTurn() ? 'active' : ''}">${isMyTurn() ? 'Your turn' : 'Watching'}</span>
+            </div>
+            <div class="boards-grid">
+              ${renderMyBoardCard()}
+              ${renderOpponentBoards()}
+            </div>
+          </section>
+
+          <section class="panel stack">
+            <div class="section-head">
+              <h2>Move History</h2>
+              <span class="badge">${state.moveHistory.length} moves</span>
+            </div>
+            ${renderMoveHistory()}
+          </section>
+        ` : `
+          <section class="panel empty-state">
+            <h2>No Game Open</h2>
+            <p>Create a new lobby or join one from the list on the left.</p>
+          </section>
+        `}
       </main>
     </div>
   `;
 }
 
-function renderMessages() {
+function renderBanner() {
   if (state.error) {
     return `<div class="message error">${escapeHtml(state.error)}</div>`;
   }
@@ -532,123 +807,194 @@ function renderMessages() {
     return `<div class="message success">${escapeHtml(state.success)}</div>`;
   }
   if (!state.playerId) {
-    return `<div class="message info">Create a player first, then create or join a game.</div>`;
+    return `<div class="message info">Register a player, then create or join a game.</div>`;
   }
-  if (!state.gameId) {
-    return `<div class="message info">You are signed in as <strong>${escapeHtml(state.username)}</strong>. Create or join a game.</div>`;
+  if (!state.activeGameId) {
+    return `<div class="message info">You are signed in as <strong>${escapeHtml(state.username)}</strong>. Pick an open game or start a new one.</div>`;
   }
-  return '';
+  if (state.currentGame?.status === 'finished') {
+    return `<div class="message success">Game over${state.currentGame.winner_username ? ` — winner: <strong>${escapeHtml(state.currentGame.winner_username)}</strong>` : ''}.</div>`;
+  }
+  if (state.currentGame?.status === 'waiting') {
+    return `<div class="message info">Waiting for all players to place ships${canStartCurrentGame() ? ' — this game can start now.' : '.'}</div>`;
+  }
+  return `<div class="message info">${isMyTurn() ? 'It is your turn.' : `Waiting for ${escapeHtml(state.currentGame?.current_player_username || 'the next player')}.`}</div>`;
 }
 
-function renderStats() {
-  const stats = state.stats;
-  if (!stats) {
+function renderLobbyGames() {
+  if (!state.games.length) {
+    return `<div class="small">No games yet.</div>`;
+  }
+
+  return `
+    <div class="game-list">
+      ${state.games.map((game) => {
+        const isOpen = game.status === 'waiting';
+        const isCurrent = game.id === state.activeGameId;
+        return `
+          <div class="game-card ${isCurrent ? 'current' : ''}">
+            <div>
+              <strong>Game ${game.id}</strong>
+              <div class="small">${game.grid_size}×${game.grid_size} • ${game.player_count}/${game.max_players} players</div>
+            </div>
+            <div class="game-actions">
+              <span class="badge ${game.status === 'active' ? 'active' : ''}">${escapeHtml(game.status)}</span>
+              ${isCurrent ? `<button class="ghost" data-action="open-game" data-game-id="${game.id}">Open</button>` : ''}
+              ${!isCurrent ? `<button class="ghost" data-action="open-game" data-game-id="${game.id}">View</button>` : ''}
+              ${isOpen ? `<button data-action="join-game" data-game-id="${game.id}" ${!state.playerId ? 'disabled' : ''}>Join</button>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderMyStats() {
+  if (!state.myStats) {
     return `<div class="small">No stats yet.</div>`;
   }
 
   return `
     <div class="info-grid">
-      <div class="stat"><div class="label">Games</div><div class="value">${stats.games_played}</div></div>
-      <div class="stat"><div class="label">Wins</div><div class="value">${stats.wins}</div></div>
-      <div class="stat"><div class="label">Losses</div><div class="value">${stats.losses}</div></div>
-      <div class="stat"><div class="label">Shots</div><div class="value">${stats.total_shots}</div></div>
-      <div class="stat"><div class="label">Hits</div><div class="value">${stats.total_hits}</div></div>
-      <div class="stat"><div class="label">Accuracy</div><div class="value">${Number(stats.accuracy * 100).toFixed(1)}%</div></div>
+      <div class="stat"><div class="label">Games</div><div class="value">${state.myStats.games_played}</div></div>
+      <div class="stat"><div class="label">Wins</div><div class="value">${state.myStats.wins}</div></div>
+      <div class="stat"><div class="label">Losses</div><div class="value">${state.myStats.losses}</div></div>
+      <div class="stat"><div class="label">Shots</div><div class="value">${state.myStats.total_shots}</div></div>
+      <div class="stat"><div class="label">Hits</div><div class="value">${state.myStats.total_hits}</div></div>
+      <div class="stat"><div class="label">Accuracy</div><div class="value">${(state.myStats.accuracy * 100).toFixed(1)}%</div></div>
     </div>
   `;
 }
 
-function renderPlayers() {
-  if (!state.game?.players?.length) {
-    return `<div class="small">No game loaded yet.</div>`;
+function renderLeaderboard() {
+  if (!state.leaderboard.length) {
+    return `<div class="small">Leaderboard will appear after players start finishing games.</div>`;
   }
 
   return `
-    <div class="player-list">
-      ${state.game.players.map((player) => `
-        <div class="player-pill">
+    <div class="leaderboard-list">
+      ${state.leaderboard.map((entry) => `
+        <div class="leaderboard-row ${entry.id === state.playerId ? 'me' : ''}">
           <div>
-            <strong>${escapeHtml(player.username)}</strong>
-            <div class="small">ID ${player.player_id} • Turn ${player.turn_order + 1}</div>
+            <strong>#${entry.rank} ${escapeHtml(entry.username || 'Unknown')}</strong>
+            <div class="small">${entry.wins} wins • ${(entry.accuracy * 100).toFixed(1)}% accuracy</div>
           </div>
-          <div>
-            ${player.player_id === state.game.current_player_id ? '<span class="badge active">Current Turn</span>' : ''}
-            ${player.placement_done ? '<span class="badge">Placed</span>' : '<span class="badge">Not Placed</span>'}
-            ${player.eliminated ? '<span class="badge">Eliminated</span>' : ''}
-          </div>
+          <div class="small">${entry.total_shots} shots</div>
         </div>
       `).join('')}
     </div>
   `;
 }
 
-function renderPlacementBoard() {
+function renderCurrentGameSummary() {
+  if (!state.currentGame) {
+    return `<div class="small">Open a game to see the battle view.</div>`;
+  }
+
+  return `
+    <div class="summary-grid">
+      <div class="summary-card">
+        <div class="label">Status</div>
+        <div class="value">${escapeHtml(state.currentGame.status)}</div>
+      </div>
+      <div class="summary-card">
+        <div class="label">Grid</div>
+        <div class="value">${state.currentGame.grid_size} × ${state.currentGame.grid_size}</div>
+      </div>
+      <div class="summary-card">
+        <div class="label">Players</div>
+        <div class="value">${state.currentGame.players.length}/${state.currentGame.max_players}</div>
+      </div>
+      <div class="summary-card">
+        <div class="label">Current Turn</div>
+        <div class="value">${escapeHtml(state.currentGame.current_player_username || '—')}</div>
+      </div>
+    </div>
+
+    <div class="players-strip">
+      ${state.currentGame.players.map((player) => `
+        <div class="player-pill ${player.player_id === state.currentGame.current_player_id ? 'turn' : ''} ${player.eliminated ? 'eliminated' : ''}">
+          <div>
+            <strong>${escapeHtml(player.username)}</strong>
+            <div class="small">Turn ${player.turn_order + 1}</div>
+          </div>
+          <div class="pill-tags">
+            ${player.placement_done ? '<span class="badge">Placed</span>' : '<span class="badge">Waiting</span>'}
+            ${player.eliminated ? '<span class="badge">Eliminated</span>' : ''}
+            ${player.player_id === state.currentGame.current_player_id ? '<span class="badge active">Current</span>' : ''}
+          </div>
+        </div>
+      `).join('')}
+    </div>
+
+    <div class="actions">
+      <button class="secondary" data-action="start-game" ${canStartCurrentGame() ? '' : 'disabled'}>Start Game</button>
+    </div>
+  `;
+}
+
+function renderMyBoardCard() {
   const currentPlayer = getCurrentPlayer();
-  const gridSize = getGridSize();
-  const shipCells = placementAlreadySubmitted() ? state.myShips : state.placingShips;
-  const placementNote = !state.game
-    ? 'Create or join a game to place ships.'
-    : placementAlreadySubmitted()
-      ? 'Your ships are locked in.'
-      : `Choose exactly 3 cells. Selected: ${shipCells.length}/3`;
+  const placementNote = !currentPlayer
+    ? 'You are viewing this game, but you have not joined it.'
+    : myPlacementSubmitted()
+      ? 'Your ships are locked in and incoming shots show here.'
+      : `Choose exactly 3 cells before the game starts. Selected: ${state.pendingShips.length}/3`;
 
   return `
     <section class="board-card stack">
       <div class="board-head">
         <div>
-          <h2>Your Ships</h2>
+          <h3>Your Board</h3>
           <div class="small">${escapeHtml(placementNote)}</div>
         </div>
-        <div>
-          ${currentPlayer?.placement_done ? '<span class="badge active">Placed</span>' : '<span class="badge">Waiting</span>'}
+        <div class="pill-tags">
+          ${myPlacementSubmitted() ? '<span class="badge active">Placed</span>' : '<span class="badge">Pending</span>'}
         </div>
       </div>
       ${renderBoard({
-        gridSize,
-        type: 'placement',
-        selectedShips: shipCells,
+        boardType: 'self',
+        playerId: state.playerId,
+        title: 'Your board',
       })}
       <div class="actions">
-        <button data-action="submit-placement" ${canSubmitPlacement() ? '' : 'disabled'}>Submit Ships</button>
-        <button class="secondary" data-action="clear-placement" ${canClearPlacement() ? '' : 'disabled'}>Clear Selection</button>
+        <button data-action="submit-ships" ${canSubmitShips() ? '' : 'disabled'}>Submit Ships</button>
+        <button class="secondary" data-action="clear-pending-ships" ${canClearPendingShips() ? '' : 'disabled'}>Clear Selection</button>
       </div>
     </section>
   `;
 }
 
-function renderTargetBoard() {
-  const gridSize = getGridSize();
-  const turnText = !state.game
-    ? 'No game selected.'
-    : state.game.status === 'waiting'
-      ? 'Waiting for all players to place ships.'
-      : state.game.status === 'finished'
-        ? `Game finished${state.game.winner_id ? `. Winner ID: ${state.game.winner_id}` : ''}`
-        : isMyTurn()
-          ? 'It is your turn. Click a cell to fire.'
-          : `Waiting for player ${state.game.current_player_id}`;
+function renderOpponentBoards() {
+  const opponents = state.currentGame.players.filter((player) => player.player_id !== state.playerId);
+  if (!opponents.length) {
+    return `<div class="board-card"><div class="small">Waiting for opponents to join.</div></div>`;
+  }
 
-  return `
+  return opponents.map((player) => `
     <section class="board-card stack">
       <div class="board-head">
         <div>
-          <h2>Target Board</h2>
-          <div class="small">${escapeHtml(turnText)}</div>
+          <h3>${escapeHtml(player.username)}</h3>
+          <div class="small">${player.eliminated ? 'Eliminated' : 'Fire on this board when it is your turn.'}</div>
         </div>
-        <div>
-          <span class="badge ${isMyTurn() ? 'active' : ''}">${isMyTurn() ? 'Your Turn' : 'Stand By'}</span>
+        <div class="pill-tags">
+          ${player.eliminated ? '<span class="badge">Eliminated</span>' : ''}
+          ${player.player_id === state.currentGame.current_player_id ? '<span class="badge active">Current</span>' : ''}
         </div>
       </div>
       ${renderBoard({
-        gridSize,
-        type: 'target',
-        selectedShips: [],
+        boardType: 'target',
+        playerId: player.player_id,
+        title: player.username,
       })}
     </section>
-  `;
+  `).join('');
 }
 
-function renderBoard({ gridSize, type, selectedShips }) {
+function renderBoard({ boardType, playerId }) {
+  const gridSize = state.currentGame?.grid_size || 8;
   const header = `
     <div class="board-row">
       <div class="axis-cell"></div>
@@ -657,46 +1003,52 @@ function renderBoard({ gridSize, type, selectedShips }) {
   `;
 
   const rows = Array.from({ length: gridSize }, (_, row) => {
-    const cells = Array.from({ length: gridSize }, (_, col) => renderCell({ row, col, type, selectedShips })).join('');
+    const cells = Array.from({ length: gridSize }, (_, col) => renderCell({ boardType, playerId, row, col })).join('');
     return `<div class="board-row"><div class="axis-cell">${row}</div>${cells}</div>`;
   }).join('');
 
   return `<div class="board">${header}${rows}</div>`;
 }
 
-function renderCell({ row, col, type, selectedShips }) {
+function renderCell({ boardType, playerId, row, col }) {
   const classes = ['cell'];
   let label = '';
   let attrs = '';
 
-  const selected = selectedShips.some((ship) => ship.row === row && ship.col === col);
-  const move = moveAt(row, col);
+  if (boardType === 'self') {
+    const liveShipCells = myPlacementSubmitted() ? state.myShips : state.pendingShips;
+    const hasShip = liveShipCells.some((ship) => ship.row === row && ship.col === col);
+    const incomingMove = moveAtForTarget(playerId, row, col);
 
-  if (type === 'placement') {
-    if (selected) {
+    if (hasShip) {
       classes.push('ship');
       label = 'S';
     }
-    if (!placementAlreadySubmitted() && state.gameId) {
+
+    if (incomingMove) {
+      classes.push(incomingMove.result === 'hit' ? 'hit' : 'miss');
+      label = incomingMove.result === 'hit' ? 'X' : '•';
+    }
+
+    if (getCurrentPlayer() && !myPlacementSubmitted() && state.currentGame?.status === 'waiting') {
       classes.push('interactive');
-      attrs = `data-action="cell-place" data-row="${row}" data-col="${col}"`;
+      attrs = `data-action="toggle-ship-cell" data-row="${row}" data-col="${col}"`;
     } else {
       classes.push('disabled');
     }
-    if (move) {
-      classes.push(move.result === 'hit' ? 'hit' : 'miss');
-      label = move.result === 'hit' ? 'X' : '•';
-    }
   }
 
-  if (type === 'target') {
+  if (boardType === 'target') {
+    const move = moveAtForTarget(playerId, row, col);
+
     if (move) {
       classes.push(move.result === 'hit' ? 'hit' : 'miss');
-      label = move.result === 'hit' ? 'X' : '•';
+      label = move.result === 'hit' || move.result === 'sunk' ? 'X' : '•';
     }
-    if (canFireAt(row, col)) {
+
+    if (canFireAt(playerId, row, col)) {
       classes.push('interactive');
-      attrs = `data-action="cell-fire" data-row="${row}" data-col="${col}"`;
+      attrs = `data-action="fire-shot" data-row="${row}" data-col="${col}" data-target-player-id="${playerId}"`;
     } else {
       classes.push('disabled');
     }
@@ -705,18 +1057,26 @@ function renderCell({ row, col, type, selectedShips }) {
   return `<button class="${classes.join(' ')}" ${attrs} ${attrs ? '' : 'disabled'}>${label}</button>`;
 }
 
-function renderMoves() {
-  if (!state.moves.length) {
+function renderMoveHistory() {
+  if (!state.moveHistory.length) {
     return `<div class="small">No shots fired yet.</div>`;
   }
 
   return `
     <div class="log">
-      ${[...state.moves].reverse().map((move) => {
-        const target = move.result === 'hit' && move.hit_username ? ` on ${move.hit_username}` : '';
+      ${[...state.moveHistory].reverse().map((move) => {
+        const stamp = formatTimestamp(move.created_at);
+        const targetName = move.target_username || currentPlayerNameById(move.target_player_id);
+        const result = move.result === 'hit' ? 'HIT' : move.result === 'sunk' ? 'SUNK' : 'MISS';
         return `
           <div class="log-item">
-            <strong>${escapeHtml(move.username)}</strong> fired at (${move.row}, ${move.col}) — ${move.result.toUpperCase()}${escapeHtml(target)}
+            <div class="log-head">
+              <strong>${escapeHtml(move.username)}</strong>
+              <span class="small">${escapeHtml(stamp)}</span>
+            </div>
+            <div>
+              Fired at <strong>${escapeHtml(targetName)}</strong> on (${move.row}, ${move.col}) — <strong>${result}</strong>
+            </div>
           </div>
         `;
       }).join('')}
@@ -724,12 +1084,28 @@ function renderMoves() {
   `;
 }
 
-function canSubmitPlacement() {
-  return Boolean(state.gameId) && !placementAlreadySubmitted() && state.placingShips.length === 3;
+function formatTimestamp(value) {
+  if (!value) {
+    return '—';
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  return date.toLocaleString([], {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
 }
 
-function canClearPlacement() {
-  return !placementAlreadySubmitted() && state.placingShips.length > 0;
+function canSubmitShips() {
+  return Boolean(getCurrentPlayer()) && state.currentGame.status === 'waiting' && !myPlacementSubmitted() && state.pendingShips.length === 3;
+}
+
+function canClearPendingShips() {
+  return Boolean(getCurrentPlayer()) && state.currentGame.status === 'waiting' && !myPlacementSubmitted() && state.pendingShips.length > 0;
 }
 
 function escapeHtml(value) {
