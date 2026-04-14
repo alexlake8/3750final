@@ -330,3 +330,149 @@ label {
     font-size: 0.76rem;
   }
 }
+
+.eyebrow {
+  display: inline-block;
+  margin-bottom: 0.35rem;
+  color: var(--accent);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 0.8rem;
+}
+
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.wrap {
+  overflow-wrap: anywhere;
+}
+
+.compact-form {
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid rgba(49, 69, 111, 0.45);
+}
+
+.game-list,
+.leaderboard-list,
+.players-strip {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.game-card,
+.leaderboard-row,
+.summary-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 0.8rem;
+}
+
+.game-card {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.game-card.current {
+  border-color: rgba(110, 182, 255, 0.7);
+  box-shadow: 0 0 0 1px rgba(110, 182, 255, 0.18) inset;
+}
+
+.game-actions,
+.pill-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.leaderboard-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.leaderboard-row.me {
+  border-color: rgba(52, 211, 153, 0.55);
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.summary-card .label {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.summary-card .value {
+  margin-top: 0.35rem;
+  font-size: 1.15rem;
+  font-weight: 800;
+}
+
+.players-strip {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.player-pill.turn {
+  border-color: rgba(110, 182, 255, 0.65);
+}
+
+.player-pill.eliminated {
+  opacity: 0.75;
+}
+
+.boards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 1rem;
+}
+
+.board-card {
+  background: rgba(15, 24, 43, 0.55);
+  border: 1px solid rgba(49, 69, 111, 0.5);
+  border-radius: 18px;
+  padding: 1rem;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 2rem;
+}
+
+.log-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: center;
+  margin-bottom: 0.35rem;
+}
+
+@media (max-width: 1200px) {
+  .summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 700px) {
+  .boards-grid,
+  .summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .leaderboard-row,
+  .section-head,
+  .hero {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
