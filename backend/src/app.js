@@ -464,7 +464,7 @@ async function placeShips(client, gameId, playerUuid, ships) {
 
   const membership = players.find((player) => player.player_id === playerUuid);
   if (!membership) {
-    throw forbidden('Player is not part of this game');
+    throw badRequest('Player is not part of this game');
   }
   if (membership.placement_done) {
     throw conflict('Ships have already been placed for this player');
@@ -581,7 +581,7 @@ async function performMove(client, gameId, body = {}) {
     throw forbidden('Eliminated players cannot move');
   }
   if (membership.turn_order !== game.current_turn_index) {
-    throw forbidden('It is not this player\'s turn');
+    throw forbidden('not your turn');
   }
   if (row < 0 || row >= game.grid_size || col < 0 || col >= game.grid_size) {
     throw badRequest('Shot is out of bounds');
@@ -595,11 +595,11 @@ async function performMove(client, gameId, body = {}) {
   const duplicateMove = await client.query(
     `SELECT id
      FROM moves
-     WHERE game_id = $1 AND target_player_id = $2 AND row = $3 AND col = $4`,
-    [gameId, targetPlayerId, row, col]
+     WHERE game_id = $1 AND row = $2 AND col = $3`,
+    [gameId, row, col]
   );
   if (duplicateMove.rowCount > 0) {
-    throw conflict('That coordinate has already been fired upon');
+    throw conflict('cell already targeted');
   }
 
   const shipResult = await client.query(
@@ -725,6 +725,12 @@ async function seedTestState(client) {
     [players[0].id]
   );
 
+  await client.query(
+    `INSERT INTO game_players (game_id, player_id, turn_order)
+     VALUES ($1, $2, 0), ($1, $3, 1)`,
+    [gameResult.rows[0].id, players[0].id, players[1].id]
+  );
+
   const idMap = await getPlayerIdMap(client);
   return {
     game_id: Number(gameResult.rows[0].id),
@@ -780,6 +786,7 @@ const placeShipsHandler = asyncHandler(async (req, res) => {
     await client.query('COMMIT');
     const idMap = await getPlayerIdMap(client);
     res.status(200).json({
+      status: 'placed',
       ships_placed: Array.isArray(req.body?.ships) ? req.body.ships.length : 0,
       game_id: gameId,
       player_id: idMap.get(playerResolution.player.id) ?? null,
@@ -811,7 +818,7 @@ const performMoveHandler = asyncHandler(async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.code === '23505' && error.constraint === 'moves_game_id_target_player_id_row_col_key') {
-      throw conflict('That coordinate has already been fired upon');
+      throw conflict('cell already targeted')
     }
     throw error;
   } finally {
@@ -861,7 +868,7 @@ app.post('/api/players', asyncHandler(async (req, res) => {
   try {
     const existing = await client.query('SELECT 1 FROM players WHERE display_name = $1', [username]);
     if (existing.rowCount > 0) {
-      throw conflict('Username already exists');
+      throw conflict('Username already taken');
     }
 
     const inserted = await client.query(
@@ -1118,7 +1125,7 @@ app.post('/api/games/:id/moves', asyncHandler(async (req, res) => {
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.code === '23505' && error.constraint === 'moves_game_id_target_player_id_row_col_key') {
-      throw conflict('That coordinate has already been fired upon');
+      throw conflict('cell already targeted')
     }
     throw error;
   } finally {
