@@ -16,6 +16,7 @@ const state = {
   success: '',
   pollHandle: null,
   busy: false,
+  joinGameIdDraft: '',
 };
 
 loadLocalState();
@@ -41,12 +42,104 @@ function attachGlobalEvents() {
   document.addEventListener('submit', handleSubmit);
   document.addEventListener('click', handleClick);
   document.addEventListener('change', handleChange);
+  document.addEventListener('input', handleChange);
+}
+
+function captureRenderState() {
+  const active = document.activeElement;
+  if (!active || !('tagName' in active)) {
+    return null;
+  }
+
+  const tagName = String(active.tagName || '').toLowerCase();
+  if (!['input', 'textarea', 'select'].includes(tagName)) {
+    return null;
+  }
+
+  const selector = active.id
+    ? `#${active.id}`
+    : active.name
+      ? `${active.tagName.toLowerCase()}[name="${active.name}"]`
+      : null;
+
+  if (!selector) {
+    return null;
+  }
+
+  return {
+    selector,
+    value: 'value' in active ? active.value : null,
+    selectionStart: typeof active.selectionStart === 'number' ? active.selectionStart : null,
+    selectionEnd: typeof active.selectionEnd === 'number' ? active.selectionEnd : null,
+  };
+}
+
+function restoreRenderState(snapshot) {
+  if (!snapshot?.selector) {
+    return;
+  }
+
+  const nextActive = document.querySelector(snapshot.selector);
+  if (!nextActive) {
+    return;
+  }
+
+  if ('value' in nextActive && snapshot.value !== null) {
+    nextActive.value = snapshot.value;
+  }
+
+  nextActive.focus();
+
+  if (
+    typeof nextActive.setSelectionRange === 'function' &&
+    typeof snapshot.selectionStart === 'number' &&
+    typeof snapshot.selectionEnd === 'number'
+  ) {
+    nextActive.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
+  }
+}
+
+function normalizeStatus(status) {
+  if (status === 'waiting_setup' || status === 'waiting') {
+    return 'waiting';
+  }
+  if (status === 'playing' || status === 'active') {
+    return 'active';
+  }
+  return status || 'waiting';
+}
+
+async function copyText(text) {
+  if (!text) {
+    throw new Error('Nothing to copy yet');
+  }
+
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(String(text));
+    return;
+  }
+
+  const helper = document.createElement('textarea');
+  helper.value = String(text);
+  helper.setAttribute('readonly', 'readonly');
+  helper.style.position = 'fixed';
+  helper.style.opacity = '0';
+  document.body.appendChild(helper);
+  helper.select();
+  document.execCommand('copy');
+  document.body.removeChild(helper);
 }
 
 function handleChange(event) {
   const target = event.target;
   if (target.id === 'username') {
     state.username = target.value;
+    persistLocalState();
+    return;
+  }
+
+  if (target.name === 'game_id') {
+    state.joinGameIdDraft = target.value;
     persistLocalState();
   }
 }
@@ -98,6 +191,12 @@ async function handleClick(event) {
 
     if (action === 'join-game') {
       await joinGame(Number(target.dataset.gameId));
+      return;
+    }
+
+    if (action === 'copy-game-id') {
+      await copyText(target.dataset.gameId || state.activeGameId);
+      showSuccess(`Game ID ${target.dataset.gameId || state.activeGameId} copied`);
       return;
     }
 
@@ -186,6 +285,7 @@ function clearState() {
   state.moveHistory = [];
   state.error = '';
   state.success = '';
+  state.joinGameIdDraft = '';
   localStorage.removeItem(STORAGE_KEY);
 }
 
@@ -197,6 +297,7 @@ function persistLocalState() {
       playerId: state.playerId,
       activeGameId: state.activeGameId,
       pendingShips: state.pendingShips,
+      joinGameIdDraft: state.joinGameIdDraft,
     })
   );
 }
@@ -212,6 +313,7 @@ function loadLocalState() {
     state.playerId = parsed.playerId || null;
     state.activeGameId = parsed.activeGameId || null;
     state.pendingShips = Array.isArray(parsed.pendingShips) ? parsed.pendingShips : [];
+    state.joinGameIdDraft = parsed.joinGameIdDraft || '';
   } catch {
     localStorage.removeItem(STORAGE_KEY);
   }
@@ -324,14 +426,14 @@ function normalizeGame(raw) {
       }))
     : [];
 
-  const currentPlayerId = raw.current_player_id || raw.current_turn || null;
+  const currentPlayerId = raw.current_player_id || raw.current_turn || raw.current_turn_player_id || null;
   const currentPlayer = players.find((player) => player.player_id === currentPlayerId) || null;
   const winnerPlayer = players.find((player) => player.player_id === raw.winner_id) || null;
 
   return {
     id: Number(raw.game_id || raw.id),
     game_id: Number(raw.game_id || raw.id),
-    status: raw.status || 'waiting',
+    status: normalizeStatus(raw.status),
     grid_size: Number(raw.grid_size || 8),
     max_players: Number(raw.max_players || players.length || 2),
     player_count: Number(raw.player_count || players.length),
@@ -354,7 +456,7 @@ function normalizeGameList(rawGames) {
   return rawGames.map((game) => ({
     id: Number(game.game_id || game.id),
     game_id: Number(game.game_id || game.id),
-    status: game.status || 'waiting',
+    status: normalizeStatus(game.status),
     grid_size: Number(game.grid_size || 8),
     max_players: Number(game.max_players || 2),
     player_count: Number(game.player_count || 0),
@@ -427,11 +529,13 @@ async function createGame(formData) {
   persistLocalState();
   startPolling();
   await refreshAll();
-  showSuccess(`Game ${state.activeGameId} created`);
+  showSuccess(`Game ${state.activeGameId} created — share this Game ID with other players`);
 }
 
 async function joinGameByForm(formData) {
   const gameId = Number(formData.get('game_id'));
+  state.joinGameIdDraft = String(formData.get('game_id') || '').trim();
+  persistLocalState();
   if (!Number.isInteger(gameId) || gameId <= 0) {
     throw new Error('Enter a valid game ID');
   }
@@ -456,6 +560,8 @@ async function joinGame(gameId) {
   persistLocalState();
   startPolling();
   await refreshAll();
+  state.joinGameIdDraft = '';
+  persistLocalState();
   showSuccess(`Joined game ${gameId}`);
 }
 
@@ -678,6 +784,7 @@ async function fireShot(row, col, targetPlayerId) {
 
 function render() {
   const app = document.getElementById('app');
+  const snapshot = captureRenderState();
   app.innerHTML = `
     <section class="hero">
       <div>
@@ -706,7 +813,7 @@ function render() {
           </form>
           <div class="info-grid">
             <div class="stat"><div class="label">Player ID</div><div class="value wrap">${escapeHtml(state.playerId || '—')}</div></div>
-            <div class="stat"><div class="label">Active Game</div><div class="value">${escapeHtml(state.activeGameId || '—')}</div></div>
+            <div class="stat"><div class="label">Active Game ID</div><div class="value">${escapeHtml(state.activeGameId || '—')}</div></div>
           </div>
         </section>
 
@@ -737,11 +844,15 @@ function render() {
             <span class="badge">${state.games.filter((game) => game.status === 'waiting').length} waiting</span>
           </div>
           <form id="join-by-id-form" class="stack compact-form">
+            <div class="callout">
+              <strong>Joining a friend?</strong>
+              <div class="small">Enter the Game ID shown in their lobby card or Active Game ID box.</div>
+            </div>
             <label>
               Join by Game ID
-              <input name="game_id" type="number" min="1" placeholder="Game ID" />
+              <input name="game_id" type="number" min="1" inputmode="numeric" value="${escapeHtml(state.joinGameIdDraft)}" placeholder="Example: 42" />
             </label>
-            <button type="submit" class="secondary">Join</button>
+            <button type="submit" class="secondary">Join This Game</button>
           </form>
           ${renderLobbyGames()}
         </section>
@@ -797,6 +908,7 @@ function render() {
       </main>
     </div>
   `;
+  restoreRenderState(snapshot);
 }
 
 function renderBanner() {
@@ -835,10 +947,11 @@ function renderLobbyGames() {
           <div class="game-card ${isCurrent ? 'current' : ''}">
             <div>
               <strong>Game ${game.id}</strong>
-              <div class="small">${game.grid_size}×${game.grid_size} • ${game.player_count}/${game.max_players} players</div>
+              <div class="small">Game ID: <strong>${game.id}</strong> • ${game.grid_size}×${game.grid_size} • ${game.player_count}/${game.max_players} players</div>
             </div>
             <div class="game-actions">
               <span class="badge ${game.status === 'active' ? 'active' : ''}">${escapeHtml(game.status)}</span>
+              <button class="ghost" data-action="copy-game-id" data-game-id="${game.id}">Copy ID</button>
               ${isCurrent ? `<button class="ghost" data-action="open-game" data-game-id="${game.id}">Open</button>` : ''}
               ${!isCurrent ? `<button class="ghost" data-action="open-game" data-game-id="${game.id}">View</button>` : ''}
               ${isOpen ? `<button data-action="join-game" data-game-id="${game.id}" ${!state.playerId ? 'disabled' : ''}>Join</button>` : ''}
@@ -894,6 +1007,13 @@ function renderCurrentGameSummary() {
 
   return `
     <div class="summary-grid">
+      <div class="summary-card summary-card-emphasis">
+        <div class="label">Game ID</div>
+        <div class="value">${state.currentGame.game_id}</div>
+        <div class="summary-actions">
+          <button class="ghost small-button" data-action="copy-game-id" data-game-id="${state.currentGame.game_id}">Copy ID</button>
+        </div>
+      </div>
       <div class="summary-card">
         <div class="label">Status</div>
         <div class="value">${escapeHtml(state.currentGame.status)}</div>
@@ -940,7 +1060,7 @@ function renderMyBoardCard() {
     ? 'You are viewing this game, but you have not joined it.'
     : myPlacementSubmitted()
       ? 'Your ships are locked in and incoming shots show here.'
-      : `Choose exactly 3 cells before the game starts. Selected: ${state.pendingShips.length}/3`;
+      : `Click 3 cells to place ships, then press Submit Ships. Selected: ${state.pendingShips.length}/3`;
 
   return `
     <section class="board-card stack">
