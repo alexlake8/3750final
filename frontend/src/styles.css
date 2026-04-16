@@ -9,6 +9,7 @@
   --accent: #6eb6ff;
   --accent-2: #4f86ff;
   --hit: #ff6b6b;
+  --sunk: #ff9f1c;
   --miss: #8ca3c7;
   --ship: #34d399;
   --warn: #ffd166;
@@ -214,6 +215,11 @@ label {
 .cell.hit {
   background: rgba(255, 107, 107, 0.25);
   border-color: var(--hit);
+}
+
+.cell.sunk {
+  background: rgba(255, 159, 28, 0.28);
+  border-color: var(--sunk);
 }
 
 .cell.miss {
@@ -542,6 +548,18 @@ label {
   gap: 0.75rem;
 }
 
+.ship-drag-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.ship-location {
+  min-width: 120px;
+}
+
 .ship-preview {
   display: flex;
   gap: 0.3rem;
@@ -560,6 +578,18 @@ label {
   border-radius: 6px;
   background: rgba(52, 211, 153, 0.25);
   border: 1px solid rgba(52, 211, 153, 0.65);
+}
+
+.ship-token {
+  width: max-content;
+  padding: 0.35rem;
+  border-radius: 12px;
+  border: 1px dashed rgba(52, 211, 153, 0.45);
+  cursor: grab;
+}
+
+.ship-token:active {
+  cursor: grabbing;
 }
 
 @media (max-width: 560px) {
