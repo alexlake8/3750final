@@ -9,6 +9,7 @@ const state = {
   myStats: null,
   myShips: [],
   pendingShips: [],
+  pendingFleet: createDefaultFleet(),
   moveHistory: [],
   games: [],
   leaderboard: [],
@@ -22,6 +23,162 @@ const state = {
 loadLocalState();
 bootstrap();
 
+
+function createDefaultFleet() {
+  return [
+    { id: 'carrier', name: 'Carrier', length: 5, orientation: 'horizontal', row: null, col: null },
+    { id: 'battleship', name: 'Battleship', length: 4, orientation: 'horizontal', row: null, col: null },
+    { id: 'cruiser', name: 'Cruiser', length: 3, orientation: 'horizontal', row: null, col: null },
+  ];
+}
+
+function normalizePendingFleet(rawFleet) {
+  const defaults = createDefaultFleet();
+  if (!Array.isArray(rawFleet)) {
+    return defaults;
+  }
+
+  return defaults.map((baseShip) => {
+    const found = rawFleet.find((ship) => ship?.id === baseShip.id) || {};
+    const orientation = found.orientation === 'vertical' ? 'vertical' : 'horizontal';
+    const row = Number.isInteger(found.row) ? found.row : null;
+    const col = Number.isInteger(found.col) ? found.col : null;
+    return {
+      ...baseShip,
+      orientation,
+      row,
+      col,
+    };
+  });
+}
+
+function isPendingShipPlaced(ship) {
+  return Number.isInteger(ship?.row) && Number.isInteger(ship?.col);
+}
+
+function getShipCells(ship, orientation = ship?.orientation, row = ship?.row, col = ship?.col) {
+  if (!ship || !Number.isInteger(row) || !Number.isInteger(col)) {
+    return [];
+  }
+
+  return Array.from({ length: ship.length }, (_, index) => ({
+    row: row + (orientation === 'vertical' ? index : 0),
+    col: col + (orientation === 'horizontal' ? index : 0),
+    shipId: ship.id,
+  }));
+}
+
+function getPendingShipCells(excludeShipId = null) {
+  return state.pendingFleet.flatMap((ship) => (ship.id === excludeShipId ? [] : getShipCells(ship)));
+}
+
+function syncPendingShipsFromFleet() {
+  state.pendingShips = getPendingShipCells().map(({ row, col }) => ({ row, col }));
+}
+
+function fleetPlacementSummary() {
+  const placed = state.pendingFleet.filter(isPendingShipPlaced).length;
+  return `${placed}/${state.pendingFleet.length} ships placed`;
+}
+
+function getPendingShipById(shipId) {
+  return state.pendingFleet.find((ship) => ship.id === shipId) || null;
+}
+
+function assertPlacementPhase() {
+  ensurePlayerReady();
+  ensureCurrentGame();
+
+  if (!getCurrentPlayer()) {
+    throw new Error('Join this game before placing ships');
+  }
+
+  if (myPlacementSubmitted()) {
+    throw new Error('Your ships are already placed for this game');
+  }
+
+  if (state.currentGame?.status !== 'waiting') {
+    throw new Error('Ship placement is only available before the game starts');
+  }
+}
+
+function validatePendingShipPlacement(ship, row, col, orientation = ship.orientation) {
+  const gridSize = state.currentGame?.grid_size || 8;
+  const cells = getShipCells(ship, orientation, row, col);
+  if (!cells.length) {
+    throw new Error('Unable to place that ship');
+  }
+
+  if (cells.some((cell) => cell.row < 0 || cell.row >= gridSize || cell.col < 0 || cell.col >= gridSize)) {
+    throw new Error(`${ship.name} does not fit there`);
+  }
+
+  const occupied = new Set(getPendingShipCells(ship.id).map((cell) => `${cell.row},${cell.col}`));
+  if (cells.some((cell) => occupied.has(`${cell.row},${cell.col}`))) {
+    throw new Error(`${ship.name} overlaps another ship`);
+  }
+}
+
+function placePendingShip(shipId, row, col) {
+  assertPlacementPhase();
+  const ship = getPendingShipById(shipId);
+  if (!ship) {
+    throw new Error('That ship is no longer available');
+  }
+
+  validatePendingShipPlacement(ship, row, col, ship.orientation);
+
+  state.pendingFleet = state.pendingFleet.map((entry) => (
+    entry.id === shipId
+      ? { ...entry, row, col }
+      : entry
+  ));
+  syncPendingShipsFromFleet();
+  persistLocalState();
+  render();
+}
+
+function rotatePendingShip(shipId) {
+  assertPlacementPhase();
+  const ship = getPendingShipById(shipId);
+  if (!ship) {
+    throw new Error('That ship is no longer available');
+  }
+
+  const nextOrientation = ship.orientation === 'horizontal' ? 'vertical' : 'horizontal';
+  if (isPendingShipPlaced(ship)) {
+    validatePendingShipPlacement(ship, ship.row, ship.col, nextOrientation);
+  }
+
+  state.pendingFleet = state.pendingFleet.map((entry) => (
+    entry.id === shipId
+      ? { ...entry, orientation: nextOrientation }
+      : entry
+  ));
+  syncPendingShipsFromFleet();
+  persistLocalState();
+  render();
+}
+
+function resetPendingShip(shipId) {
+  assertPlacementPhase();
+  state.pendingFleet = state.pendingFleet.map((entry) => (
+    entry.id === shipId
+      ? { ...entry, row: null, col: null }
+      : entry
+  ));
+  syncPendingShipsFromFleet();
+  persistLocalState();
+  render();
+}
+
+function clearPendingFleet() {
+  assertPlacementPhase();
+  state.pendingFleet = createDefaultFleet();
+  syncPendingShipsFromFleet();
+  persistLocalState();
+  render();
+}
 function bootstrap() {
   attachGlobalEvents();
   render();
@@ -43,6 +200,52 @@ function attachGlobalEvents() {
   document.addEventListener('click', handleClick);
   document.addEventListener('change', handleChange);
   document.addEventListener('input', handleChange);
+  document.addEventListener('dragstart', handleDragStart);
+  document.addEventListener('dragover', handleDragOver);
+  document.addEventListener('drop', handleDrop);
+}
+
+
+function handleDragStart(event) {
+  const ship = event.target.closest('[data-draggable-ship-id]');
+  if (!ship || !event.dataTransfer) {
+    return;
+  }
+
+  event.dataTransfer.setData('text/plain', ship.dataset.draggableShipId);
+  event.dataTransfer.effectAllowed = 'move';
+}
+
+function handleDragOver(event) {
+  const dropCell = event.target.closest('[data-drop-ship-cell="true"]');
+  if (!dropCell) {
+    return;
+  }
+
+  event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = 'move';
+  }
+}
+
+function handleDrop(event) {
+  const dropCell = event.target.closest('[data-drop-ship-cell="true"]');
+  if (!dropCell) {
+    return;
+  }
+
+  event.preventDefault();
+  const shipId = event.dataTransfer?.getData('text/plain');
+  if (!shipId) {
+    return;
+  }
+
+  clearMessages();
+  try {
+    placePendingShip(shipId, Number(dropCell.dataset.row), Number(dropCell.dataset.col));
+  } catch (error) {
+    showError(error.message);
+  }
 }
 
 function captureRenderState() {
@@ -204,7 +407,8 @@ async function handleClick(event) {
       const nextGameId = Number(target.dataset.gameId);
       if (state.activeGameId !== nextGameId) {
         state.myShips = [];
-        state.pendingShips = [];
+        state.pendingFleet = createDefaultFleet();
+        syncPendingShipsFromFleet();
         state.moveHistory = [];
       }
       state.activeGameId = nextGameId;
@@ -220,21 +424,26 @@ async function handleClick(event) {
       state.activeGameId = null;
       state.currentGame = null;
       state.myShips = [];
-      state.pendingShips = [];
+      state.pendingFleet = createDefaultFleet();
+      syncPendingShipsFromFleet();
       state.moveHistory = [];
       persistLocalState();
       render();
       return;
     }
 
-    if (action === 'toggle-ship-cell') {
-      togglePendingShip(Number(target.dataset.row), Number(target.dataset.col));
+    if (action === 'rotate-pending-ship') {
+      rotatePendingShip(target.dataset.shipId);
+      return;
+    }
+
+    if (action === 'reset-pending-ship') {
+      resetPendingShip(target.dataset.shipId);
       return;
     }
 
     if (action === 'clear-pending-ships') {
-      state.pendingShips = [];
-      render();
+      clearPendingFleet();
       return;
     }
 
@@ -252,7 +461,7 @@ async function handleClick(event) {
       await fireShot(
         Number(target.dataset.row),
         Number(target.dataset.col),
-        target.dataset.targetPlayerId
+        Number(target.dataset.targetPlayerId)
       );
       return;
     }
@@ -281,7 +490,8 @@ function clearState() {
   state.currentGame = null;
   state.myStats = null;
   state.myShips = [];
-  state.pendingShips = [];
+  state.pendingFleet = createDefaultFleet();
+  syncPendingShipsFromFleet();
   state.moveHistory = [];
   state.error = '';
   state.success = '';
@@ -297,6 +507,7 @@ function persistLocalState() {
       playerId: state.playerId,
       activeGameId: state.activeGameId,
       pendingShips: state.pendingShips,
+      pendingFleet: state.pendingFleet,
       joinGameIdDraft: state.joinGameIdDraft,
     })
   );
@@ -312,7 +523,8 @@ function loadLocalState() {
     state.username = parsed.username || '';
     state.playerId = parsed.playerId || null;
     state.activeGameId = parsed.activeGameId || null;
-    state.pendingShips = Array.isArray(parsed.pendingShips) ? parsed.pendingShips : [];
+    state.pendingFleet = normalizePendingFleet(parsed.pendingFleet);
+    syncPendingShipsFromFleet();
     state.joinGameIdDraft = parsed.joinGameIdDraft || '';
   } catch {
     localStorage.removeItem(STORAGE_KEY);
@@ -342,7 +554,7 @@ function humanizeError(message) {
   if (/not this player's turn|not your turn/i.test(normalized)) {
     return 'It is not your turn yet.';
   }
-  if (/already been fired upon|already fired/i.test(normalized)) {
+  if (/already been fired upon|already fired|cell already targeted/i.test(normalized)) {
     return 'That square was already targeted.';
   }
   if (/game is not active/i.test(normalized)) {
@@ -524,7 +736,8 @@ async function createGame(formData) {
   state.activeGameId = Number(rawGame.game_id || rawGame.id);
   state.currentGame = normalizeGame(rawGame);
   state.myShips = [];
-  state.pendingShips = [];
+  state.pendingFleet = createDefaultFleet();
+  syncPendingShipsFromFleet();
   state.moveHistory = [];
   persistLocalState();
   startPolling();
@@ -555,7 +768,8 @@ async function joinGame(gameId) {
 
   state.activeGameId = gameId;
   state.myShips = [];
-  state.pendingShips = [];
+  state.pendingFleet = createDefaultFleet();
+  syncPendingShipsFromFleet();
   state.moveHistory = [];
   persistLocalState();
   startPolling();
@@ -672,56 +886,29 @@ function canStartCurrentGame() {
   return state.currentGame.players.length >= 2 && state.currentGame.players.every((player) => player.placement_done);
 }
 
-function togglePendingShip(row, col) {
-  ensurePlayerReady();
-  ensureCurrentGame();
-
-  if (!getCurrentPlayer()) {
-    throw new Error('Join this game before placing ships');
-  }
-
-  if (myPlacementSubmitted()) {
-    throw new Error('Your ships are already placed for this game');
-  }
-
-  const existingIndex = state.pendingShips.findIndex((ship) => ship.row === row && ship.col === col);
-  if (existingIndex >= 0) {
-    state.pendingShips.splice(existingIndex, 1);
-    persistLocalState();
-    render();
-    return;
-  }
-
-  if (state.pendingShips.length >= 3) {
-    throw new Error('Choose exactly 3 ship cells');
-  }
-
-  state.pendingShips.push({ row, col });
-  persistLocalState();
-  render();
-}
-
 async function submitShips() {
   ensurePlayerReady();
   ensureCurrentGame();
 
-  if (state.pendingShips.length !== 3) {
-    throw new Error('Choose exactly 3 ship cells first');
+  const pendingShipCells = getPendingShipCells().map(({ row, col }) => ({ row, col }));
+  if (!state.pendingFleet.every(isPendingShipPlaced) || pendingShipCells.length !== 12) {
+    throw new Error('Place all 3 ships (lengths 5, 4, and 3) before submitting');
   }
 
   await api(`/api/games/${state.activeGameId}/ships`, {
     method: 'POST',
     body: JSON.stringify({
       player_id: state.playerId,
-      ships: state.pendingShips,
+      ships: pendingShipCells,
     }),
   });
 
-  state.myShips = [...state.pendingShips];
-  state.pendingShips = [];
+  state.myShips = [...pendingShipCells];
+  state.pendingFleet = createDefaultFleet();
+  syncPendingShipsFromFleet();
   persistLocalState();
   await refreshAll();
-  showSuccess('Ships placed successfully');
+  showSuccess('Fleet placed successfully');
 }
 
 async function startCurrentGame() {
@@ -740,12 +927,13 @@ function moveAtForTarget(targetPlayerId, row, col) {
 }
 
 function canFireAt(targetPlayerId, row, col) {
-  const opponent = state.currentGame?.players?.find((player) => player.player_id === targetPlayerId);
+  const normalizedTargetPlayerId = Number(targetPlayerId);
+  const opponent = state.currentGame?.players?.find((player) => player.player_id === normalizedTargetPlayerId);
   return Boolean(
     isMyTurn() &&
       opponent &&
       !opponent.eliminated &&
-      !moveAtForTarget(targetPlayerId, row, col)
+      !moveAtForTarget(normalizedTargetPlayerId, row, col)
   );
 }
 
@@ -1059,8 +1247,8 @@ function renderMyBoardCard() {
   const placementNote = !currentPlayer
     ? 'You are viewing this game, but you have not joined it.'
     : myPlacementSubmitted()
-      ? 'Your ships are locked in and incoming shots show here.'
-      : `Click 3 cells to place ships, then press Submit Ships. Selected: ${state.pendingShips.length}/3`;
+      ? 'Your fleet is locked in and incoming shots show here.'
+      : `Drag the 5, 4, and 3 length ships onto your board. ${fleetPlacementSummary()}.`;
 
   return `
     <section class="board-card stack">
@@ -1070,19 +1258,58 @@ function renderMyBoardCard() {
           <div class="small">${escapeHtml(placementNote)}</div>
         </div>
         <div class="pill-tags">
-          ${myPlacementSubmitted() ? '<span class="badge active">Placed</span>' : '<span class="badge">Pending</span>'}
+          ${myPlacementSubmitted() ? '<span class="badge active">Placed</span>' : '<span class="badge">Setup</span>'}
         </div>
       </div>
+      ${!myPlacementSubmitted() && currentPlayer ? renderFleetBuilder() : ''}
       ${renderBoard({
         boardType: 'self',
         playerId: state.playerId,
         title: 'Your board',
       })}
       <div class="actions">
-        <button data-action="submit-ships" ${canSubmitShips() ? '' : 'disabled'}>Submit Ships</button>
-        <button class="secondary" data-action="clear-pending-ships" ${canClearPendingShips() ? '' : 'disabled'}>Clear Selection</button>
+        <button data-action="submit-ships" ${canSubmitShips() ? '' : 'disabled'}>Submit Fleet</button>
+        <button class="secondary" data-action="clear-pending-ships" ${canClearPendingShips() ? '' : 'disabled'}>Reset Fleet</button>
       </div>
     </section>
+  `;
+}
+
+
+function renderFleetBuilder() {
+  return `
+    <div class="fleet-builder stack">
+      <div class="callout">
+        <strong>Place your fleet</strong>
+        <div class="small">Drag each ship onto the board. Use Rotate to switch between horizontal and vertical placement.</div>
+      </div>
+      <div class="shipyard">
+        ${state.pendingFleet.map((ship) => {
+          const placed = isPendingShipPlaced(ship);
+          const previewClass = ship.orientation === 'vertical' ? 'vertical' : 'horizontal';
+          const location = placed ? `Placed at (${ship.row}, ${ship.col})` : 'Not placed yet';
+          return `
+            <div class="ship-card ${placed ? 'placed' : ''}" draggable="true" data-draggable-ship-id="${ship.id}">
+              <div class="ship-card-top">
+                <div>
+                  <strong>${escapeHtml(ship.name)}</strong>
+                  <div class="small">Length ${ship.length} • ${escapeHtml(ship.orientation)}</div>
+                </div>
+                <span class="badge ${placed ? 'active' : ''}">${placed ? 'Placed' : 'Drag me'}</span>
+              </div>
+              <div class="ship-preview ${previewClass}">
+                ${Array.from({ length: ship.length }, () => '<span></span>').join('')}
+              </div>
+              <div class="small">${escapeHtml(location)}</div>
+              <div class="game-actions">
+                <button type="button" class="ghost small-button" data-action="rotate-pending-ship" data-ship-id="${ship.id}">Rotate</button>
+                <button type="button" class="ghost small-button" data-action="reset-pending-ship" data-ship-id="${ship.id}" ${placed ? '' : 'disabled'}>Remove</button>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
   `;
 }
 
@@ -1151,8 +1378,8 @@ function renderCell({ boardType, playerId, row, col }) {
     }
 
     if (getCurrentPlayer() && !myPlacementSubmitted() && state.currentGame?.status === 'waiting') {
-      classes.push('interactive');
-      attrs = `data-action="toggle-ship-cell" data-row="${row}" data-col="${col}"`;
+      classes.push('interactive', 'droppable');
+      attrs = `data-drop-ship-cell="true" data-row="${row}" data-col="${col}"`;
     } else {
       classes.push('disabled');
     }
@@ -1221,11 +1448,18 @@ function formatTimestamp(value) {
 }
 
 function canSubmitShips() {
-  return Boolean(getCurrentPlayer()) && state.currentGame.status === 'waiting' && !myPlacementSubmitted() && state.pendingShips.length === 3;
+  return Boolean(getCurrentPlayer())
+    && state.currentGame.status === 'waiting'
+    && !myPlacementSubmitted()
+    && state.pendingFleet.every(isPendingShipPlaced)
+    && getPendingShipCells().length === 12;
 }
 
 function canClearPendingShips() {
-  return Boolean(getCurrentPlayer()) && state.currentGame.status === 'waiting' && !myPlacementSubmitted() && state.pendingShips.length > 0;
+  return Boolean(getCurrentPlayer())
+    && state.currentGame.status === 'waiting'
+    && !myPlacementSubmitted()
+    && state.pendingFleet.some(isPendingShipPlaced);
 }
 
 function escapeHtml(value) {
