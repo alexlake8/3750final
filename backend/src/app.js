@@ -241,6 +241,11 @@ function serializeMoveRow(row, idMap) {
   return {
     move_id: Number(row.move_id ?? row.id),
     player_id: idMap.get(row.player_id) ?? null,
+    username: row.shooter_name || null,
+    target_player_id: idMap.get(row.target_player_id) ?? null,
+    target_username: row.target_name || null,
+    hit_player_id: row.hit_player_id ? (idMap.get(row.hit_player_id) ?? null) : null,
+    hit_username: row.hit_name || null,
     row: Number(row.row),
     col: Number(row.col),
     result: row.result,
@@ -250,8 +255,9 @@ function serializeMoveRow(row, idMap) {
 }
 
 function validateCoordinates(ships, gridSize) {
-  if (!Array.isArray(ships) || ships.length !== 3) {
-    throw badRequest('Exactly 3 single-cell ships are required');
+  const validFleetSizes = new Set([3, 12]);
+  if (!Array.isArray(ships) || !validFleetSizes.has(ships.length)) {
+    throw badRequest('Ships must contain either 3 legacy cells or a 12-cell fleet');
   }
 
   const seen = new Set();
@@ -367,8 +373,14 @@ async function getMovesForGame(client, gameId) {
   const [result, idMap] = await Promise.all([
     client.query(
       `SELECT m.id AS move_id, m.row, m.col, m.result, m.created_at,
-              m.player_id
+              m.player_id, m.target_player_id, m.hit_player_id,
+              shooter.display_name AS shooter_name,
+              target.display_name AS target_name,
+              hit.display_name AS hit_name
        FROM moves m
+       JOIN players shooter ON shooter.id = m.player_id
+       LEFT JOIN players target ON target.id = m.target_player_id
+       LEFT JOIN players hit ON hit.id = m.hit_player_id
        WHERE m.game_id = $1
        ORDER BY m.id ASC`,
       [gameId]
@@ -595,8 +607,8 @@ async function performMove(client, gameId, body = {}) {
   const duplicateMove = await client.query(
     `SELECT id
      FROM moves
-     WHERE game_id = $1 AND row = $2 AND col = $3`,
-    [gameId, row, col]
+     WHERE game_id = $1 AND target_player_id = $2 AND row = $3 AND col = $4`,
+    [gameId, targetPlayerId, row, col]
   );
   if (duplicateMove.rowCount > 0) {
     throw conflict('cell already targeted');
