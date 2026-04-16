@@ -702,19 +702,41 @@ async function createOrLoadPlayer(formData) {
     throw new Error('Enter a username first');
   }
 
-  const result = normalizePlayerResponse(
-    await api('/api/players', {
-      method: 'POST',
-      body: JSON.stringify({ username }),
-    })
-  );
+  let result;
+  let loadedExisting = false;
+
+  try {
+    result = normalizePlayerResponse(
+      await api('/api/players', {
+        method: 'POST',
+        body: JSON.stringify({ username }),
+      })
+    );
+  } catch (error) {
+    if (!/username already taken|conflict/i.test(String(error?.message || ''))) {
+      throw error;
+    }
+
+    const players = await api('/api/players');
+    const existingPlayer = (Array.isArray(players) ? players : []).find((player) => {
+      const candidate = String(player?.username || player?.display_name || '').trim();
+      return candidate === username || candidate.toLowerCase() === username.toLowerCase();
+    });
+
+    if (!existingPlayer) {
+      throw new Error('That username already exists, but the player could not be loaded');
+    }
+
+    result = normalizePlayerResponse(existingPlayer);
+    loadedExisting = true;
+  }
 
   state.username = result.username || username;
   state.playerId = result.id;
   persistLocalState();
   await refreshStats();
   await refreshLeaderboard();
-  showSuccess(`Player ready: ${state.username}`);
+  showSuccess(loadedExisting ? `Loaded existing player: ${state.username}` : `Player ready: ${state.username}`);
 }
 
 async function createGame(formData) {
@@ -1289,18 +1311,20 @@ function renderFleetBuilder() {
           const previewClass = ship.orientation === 'vertical' ? 'vertical' : 'horizontal';
           const location = placed ? `Placed at (${ship.row}, ${ship.col})` : 'Not placed yet';
           return `
-            <div class="ship-card ${placed ? 'placed' : ''}" draggable="true" data-draggable-ship-id="${ship.id}">
+            <div class="ship-card ${placed ? 'placed' : ''}">
               <div class="ship-card-top">
                 <div>
                   <strong>${escapeHtml(ship.name)}</strong>
                   <div class="small">Length ${ship.length} • ${escapeHtml(ship.orientation)}</div>
                 </div>
-                <span class="badge ${placed ? 'active' : ''}">${placed ? 'Placed' : 'Drag me'}</span>
+                <span class="badge ${placed ? 'active' : ''}">${placed ? 'Placed' : 'Drag the ship'}</span>
               </div>
-              <div class="ship-preview ${previewClass}">
-                ${Array.from({ length: ship.length }, () => '<span></span>').join('')}
+              <div class="ship-drag-row">
+                <div class="ship-preview ship-token ${previewClass}" draggable="true" data-draggable-ship-id="${ship.id}" role="img" aria-label="${escapeHtml(ship.name)} ship graphic">
+                  ${Array.from({ length: ship.length }, () => '<span></span>').join('')}
+                </div>
+                <div class="small ship-location">${escapeHtml(location)}</div>
               </div>
-              <div class="small">${escapeHtml(location)}</div>
               <div class="game-actions">
                 <button type="button" class="ghost small-button" data-action="rotate-pending-ship" data-ship-id="${ship.id}">Rotate</button>
                 <button type="button" class="ghost small-button" data-action="reset-pending-ship" data-ship-id="${ship.id}" ${placed ? '' : 'disabled'}>Remove</button>
@@ -1373,8 +1397,9 @@ function renderCell({ boardType, playerId, row, col }) {
     }
 
     if (incomingMove) {
-      classes.push(incomingMove.result === 'hit' ? 'hit' : 'miss');
-      label = incomingMove.result === 'hit' ? 'X' : '•';
+      const impactClass = incomingMove.result === 'sunk' ? 'sunk' : incomingMove.result === 'hit' ? 'hit' : 'miss';
+      classes.push(impactClass);
+      label = impactClass === 'miss' ? '•' : 'X';
     }
 
     if (getCurrentPlayer() && !myPlacementSubmitted() && state.currentGame?.status === 'waiting') {
@@ -1389,8 +1414,9 @@ function renderCell({ boardType, playerId, row, col }) {
     const move = moveAtForTarget(playerId, row, col);
 
     if (move) {
-      classes.push(move.result === 'hit' ? 'hit' : 'miss');
-      label = move.result === 'hit' || move.result === 'sunk' ? 'X' : '•';
+      const impactClass = move.result === 'sunk' ? 'sunk' : move.result === 'hit' ? 'hit' : 'miss';
+      classes.push(impactClass);
+      label = impactClass === 'miss' ? '•' : 'X';
     }
 
     if (canFireAt(playerId, row, col)) {
