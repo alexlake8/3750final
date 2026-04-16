@@ -499,3 +499,71 @@ label {
   border-radius: 8px;
   font-size: 0.85rem;
 }
+
+.cell.droppable {
+  position: relative;
+}
+
+.cell.droppable::after {
+  content: '';
+  position: absolute;
+  inset: 6px;
+  border: 1px dashed rgba(110, 182, 255, 0.35);
+  border-radius: 6px;
+}
+
+.fleet-builder {
+  gap: 0.75rem;
+}
+
+.shipyard {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
+}
+
+.ship-card {
+  background: rgba(17, 26, 49, 0.9);
+  border: 1px solid rgba(49, 69, 111, 0.75);
+  border-radius: 14px;
+  padding: 0.8rem;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.ship-card.placed {
+  border-color: rgba(52, 211, 153, 0.55);
+}
+
+.ship-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.ship-preview {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+
+.ship-preview.vertical {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.ship-preview span {
+  display: inline-block;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: rgba(52, 211, 153, 0.25);
+  border: 1px solid rgba(52, 211, 153, 0.65);
+}
+
+@media (max-width: 560px) {
+  .shipyard {
+    grid-template-columns: 1fr;
+  }
+}
