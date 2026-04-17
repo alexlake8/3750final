@@ -101,7 +101,7 @@ label {
   display: grid;
   grid-template-columns: 320px 360px minmax(0, 1fr);
   grid-template-areas: "identity lobby game";
-  gap: 1.25rem;
+  gap: 2rem;
   align-items: start;
 }
 
