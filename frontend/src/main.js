@@ -1050,6 +1050,14 @@ function render() {
           <h2>Your Stats</h2>
           ${renderMyStats()}
         </section>
+
+        <section class="panel stack">
+          <div class="section-head">
+            <h2>Leaderboard</h2>
+            <span class="badge">Top ${Math.min(5, state.leaderboard.length)}</span>
+          </div>
+          ${renderLeaderboard()}
+        </section>
       </aside>
 
       <aside class="stack lobby-col">
@@ -1091,14 +1099,6 @@ function render() {
             <button type="submit" class="secondary">Join This Game</button>
           </form>
           ${renderLobbyGames()}
-        </section>
-
-        <section class="panel stack">
-          <div class="section-head">
-            <h2>Leaderboard</h2>
-            <span class="badge">Top ${state.leaderboard.length || 0}</span>
-          </div>
-          ${renderLeaderboard()}
         </section>
       </aside>
 
@@ -1235,9 +1235,11 @@ function renderLeaderboard() {
     return `<div class="small">Leaderboard will appear after players start finishing games.</div>`;
   }
 
+  const topFive = state.leaderboard.slice(0, 5);
+
   return `
     <div class="leaderboard-list">
-      ${state.leaderboard.map((entry) => `
+      ${topFive.map((entry) => `
         <div class="leaderboard-row ${entry.id === state.playerId ? 'me' : ''}">
           <div>
             <strong>#${entry.rank} ${escapeHtml(entry.username || 'Unknown')}</strong>
