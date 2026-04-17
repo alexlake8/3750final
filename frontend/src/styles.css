@@ -74,9 +74,9 @@ label {
 }
 
 #app {
-  max-width: 1400px;
+  max-width: 1800px;
   margin: 0 auto;
-  padding: 1.2rem;
+  padding: 1.2rem 1.5rem;
 }
 
 .hero {
@@ -99,9 +99,15 @@ label {
 
 .layout {
   display: grid;
-  grid-template-columns: 360px 1fr;
-  gap: 1rem;
+  grid-template-columns: 320px 360px minmax(0, 1fr);
+  grid-template-areas: "identity lobby game";
+  gap: 1.25rem;
+  align-items: start;
 }
+
+.identity-col { grid-area: identity; }
+.lobby-col    { grid-area: lobby; }
+.game-col     { grid-area: game; }
 
 .panel {
   background: rgba(20, 28, 51, 0.95);
@@ -313,9 +319,22 @@ label {
   flex-wrap: wrap;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1400px) {
+  .layout {
+    grid-template-columns: 340px minmax(0, 1fr);
+    grid-template-areas:
+      "identity game"
+      "lobby    game";
+  }
+}
+
+@media (max-width: 1000px) {
   .layout {
     grid-template-columns: 1fr;
+    grid-template-areas:
+      "identity"
+      "game"
+      "lobby";
   }
 
   .main-grid {
@@ -410,7 +429,7 @@ label {
 
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 0.75rem;
 }
 
@@ -461,12 +480,6 @@ label {
   gap: 0.75rem;
   align-items: center;
   margin-bottom: 0.35rem;
-}
-
-@media (max-width: 1200px) {
-  .summary-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 700px) {
