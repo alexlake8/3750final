@@ -1030,7 +1030,7 @@ function render() {
     ${renderBanner()}
 
     <div class="layout">
-      <aside class="stack">
+      <aside class="stack identity-col">
         <section class="panel stack">
           <h2>Player</h2>
           <form id="player-form" class="stack">
@@ -1046,6 +1046,13 @@ function render() {
           </div>
         </section>
 
+        <section class="panel stack">
+          <h2>Your Stats</h2>
+          ${renderMyStats()}
+        </section>
+      </aside>
+
+      <aside class="stack lobby-col">
         <section class="panel stack">
           <h2>Create Game</h2>
           <form id="create-game-form" class="stack">
@@ -1087,11 +1094,6 @@ function render() {
         </section>
 
         <section class="panel stack">
-          <h2>Your Stats</h2>
-          ${renderMyStats()}
-        </section>
-
-        <section class="panel stack">
           <div class="section-head">
             <h2>Leaderboard</h2>
             <span class="badge">Top ${state.leaderboard.length || 0}</span>
@@ -1100,7 +1102,7 @@ function render() {
         </section>
       </aside>
 
-      <main class="stack">
+      <main class="stack game-col">
         <section class="panel stack">
           <div class="section-head">
             <h2>Current Game</h2>
