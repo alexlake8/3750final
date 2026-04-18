@@ -1438,13 +1438,16 @@ function renderBoard({ boardType, playerId }) {
     return `<div class="board-row"><div class="axis-cell">${row}</div>${cells}</div>`;
   }).join('');
 
-  return `<div class="board">${header}${rows}</div>`;
+  return `<div class="board board-${boardType}">${header}${rows}</div>`;
 }
 
 function renderCell({ boardType, playerId, row, col }) {
   const classes = ['cell'];
   let label = '';
   let attrs = '';
+
+  const targetedPlayer = state.currentGame?.players?.find((p) => p.player_id === playerId);
+  const playerEliminated = Boolean(targetedPlayer?.eliminated);
 
   if (boardType === 'self') {
     const liveShipCells = myPlacementSubmitted() ? state.myShips : state.pendingShips;
@@ -1457,7 +1460,9 @@ function renderCell({ boardType, playerId, row, col }) {
     }
 
     if (incomingMove) {
-      const impactClass = incomingMove.result === 'sunk' ? 'sunk' : incomingMove.result === 'hit' ? 'hit' : 'miss';
+      const wasHit = incomingMove.result === 'hit' || incomingMove.result === 'sunk';
+      // If my whole fleet is gone, paint hit cells as sunk (dark red).
+      const impactClass = wasHit ? (playerEliminated ? 'sunk' : 'hit') : 'miss';
       classes.push(impactClass);
       label = impactClass === 'miss' ? '•' : 'X';
     }
@@ -1474,7 +1479,9 @@ function renderCell({ boardType, playerId, row, col }) {
     const move = moveAtForTarget(playerId, row, col);
 
     if (move) {
-      const impactClass = move.result === 'sunk' ? 'sunk' : move.result === 'hit' ? 'hit' : 'miss';
+      const wasHit = move.result === 'hit' || move.result === 'sunk';
+      // When the opponent is fully eliminated, paint all their hit cells red ("sunk").
+      const impactClass = wasHit ? (playerEliminated ? 'sunk' : 'hit') : 'miss';
       classes.push(impactClass);
       label = impactClass === 'miss' ? '•' : 'X';
     }
