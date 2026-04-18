@@ -1030,6 +1030,7 @@ function render() {
     ${renderBanner()}
 
     <div class="layout">
+      <div class="sidebar">
       <aside class="stack identity-col">
         <section class="panel stack">
           <h2>Player</h2>
@@ -1101,6 +1102,7 @@ function render() {
           ${renderLobbyGames()}
         </section>
       </aside>
+      </div>
 
       <main class="stack game-col">
         <section class="panel stack">
@@ -1345,29 +1347,19 @@ function renderFleetBuilder() {
     <div class="fleet-builder stack">
       <div class="callout">
         <strong>Place your fleet</strong>
-        <div class="small">Drag each ship onto the board. Use Rotate to switch between horizontal and vertical placement.</div>
+        <div class="small">Drag a ship row onto your board. Use Rotate to switch orientation.</div>
       </div>
-      <div class="shipyard">
+      <div class="fleet-list">
         ${state.pendingFleet.map((ship) => {
           const placed = isPendingShipPlaced(ship);
-          const previewClass = ship.orientation === 'vertical' ? 'vertical' : 'horizontal';
-          const location = placed ? `Placed at (${ship.row}, ${ship.col})` : 'Not placed yet';
+          const status = placed ? `at (${ship.row}, ${ship.col})` : 'not placed';
           return `
-            <div class="ship-card ${placed ? 'placed' : ''}">
-              <div class="ship-card-top">
-                <div>
-                  <strong>${escapeHtml(ship.name)}</strong>
-                  <div class="small">Length ${ship.length} • ${escapeHtml(ship.orientation)}</div>
-                </div>
-                <span class="badge ${placed ? 'active' : ''}">${placed ? 'Placed' : 'Drag the ship'}</span>
+            <div class="fleet-row ${placed ? 'placed' : ''}" draggable="true" data-draggable-ship-id="${ship.id}">
+              <div class="fleet-row-info">
+                <strong>${escapeHtml(ship.name)}</strong>
+                <div class="small">Length ${ship.length} • ${escapeHtml(ship.orientation)} • ${escapeHtml(status)}</div>
               </div>
-              <div class="ship-drag-row">
-                <div class="ship-preview ship-token ${previewClass}" draggable="true" data-draggable-ship-id="${ship.id}" role="img" aria-label="${escapeHtml(ship.name)} ship graphic">
-                  ${Array.from({ length: ship.length }, () => '<span></span>').join('')}
-                </div>
-                <div class="small ship-location">${escapeHtml(location)}</div>
-              </div>
-              <div class="game-actions">
+              <div class="fleet-row-actions">
                 <button type="button" class="ghost small-button" data-action="rotate-pending-ship" data-ship-id="${ship.id}">Rotate</button>
                 <button type="button" class="ghost small-button" data-action="reset-pending-ship" data-ship-id="${ship.id}" ${placed ? '' : 'disabled'}>Remove</button>
               </div>
