@@ -144,19 +144,19 @@ p { margin: 0; }
   align-items: start;
 }
 
-/* Two asides stack into column 1; main spans both rows in column 2. */
-.identity-col {
+/* The .sidebar wrapper is the sole left-column grid child. Inside it,
+   identity-col and lobby-col stack via flex so they always sit
+   back-to-back, independent of how tall the game column grows. */
+.sidebar {
   grid-column: 1;
-  grid-row: 1;
   display: flex;
   flex-direction: column;
   gap: 1rem;
   min-width: 0;
 }
 
+.identity-col,
 .lobby-col {
-  grid-column: 1;
-  grid-row: 2;
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -166,7 +166,6 @@ p { margin: 0; }
 .game-col,
 main.stack {
   grid-column: 2;
-  grid-row: 1 / -1;
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -710,75 +709,54 @@ button.small-button {
 }
 
 /* ============================================================
-   SHIP / FLEET BUILDER
+   SHIP / FLEET BUILDER  —  compact list, one row per ship
    ============================================================ */
 .fleet-builder { gap: 0.9rem; }
 
-.shipyard {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 0.75rem;
+.fleet-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
 }
 
-.ship-card {
+.fleet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.85rem;
   background: var(--surface-1);
   border: 1px solid var(--line-strong);
   border-radius: var(--r);
-  padding: 0.85rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.65rem;
   min-width: 0;
+  cursor: grab;
 }
 
-.ship-card.placed {
+.fleet-row:active { cursor: grabbing; }
+
+.fleet-row.placed {
   border-color: var(--ship);
   background: rgba(45, 212, 191, 0.06);
 }
 
-.ship-card-top {
+.fleet-row-info {
   display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 0.5rem;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+  flex: 1;
 }
 
-.ship-card-top strong {
+.fleet-row-info strong {
   color: var(--ink-bright);
   font-family: var(--font-display);
 }
 
-.ship-drag-row {
+.fleet-row-actions {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.6rem;
-  flex-wrap: wrap;
+  gap: 0.4rem;
+  flex-shrink: 0;
 }
-
-.ship-location { min-width: 120px; }
-
-.ship-preview { display: flex; gap: 3px; align-items: center; }
-.ship-preview.vertical { flex-direction: column; align-items: flex-start; }
-
-.ship-preview span {
-  display: inline-block;
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
-  background: var(--ship-soft);
-  border: 1px solid var(--ship);
-}
-
-.ship-token {
-  width: max-content;
-  padding: 0.3rem;
-  border-radius: var(--r-sm);
-  border: 1px dashed rgba(45, 212, 191, 0.5);
-  cursor: grab;
-}
-
-.ship-token:active { cursor: grabbing; }
 
 .pill-tags {
   display: flex;
@@ -862,6 +840,9 @@ button.small-button {
    ============================================================ */
 @media (max-width: 1000px) {
   .layout { grid-template-columns: 1fr; }
+  .sidebar,
+  .game-col,
+  main.stack { grid-column: auto; }
   .hero { flex-direction: column; align-items: flex-start; }
   .boards-grid { grid-template-columns: 1fr; }
 }
