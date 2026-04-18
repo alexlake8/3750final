@@ -666,8 +666,8 @@ button.small-button {
 }
 
 .cell {
-  background: rgba(56, 189, 248, 0.04);
-  border: 1px solid rgba(56, 189, 248, 0.09);
+  background: var(--bg-void);
+  border: 1px solid rgba(56, 189, 248, 0.12);
   color: transparent;
   transition: background 100ms, border-color 100ms;
 }
@@ -679,8 +679,9 @@ button.small-button {
 }
 
 .cell.ship {
-  background: var(--ship-soft);
-  border-color: var(--ship);
+  background: var(--ship);
+  border-color: rgba(5, 8, 15, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(45, 212, 191, 0.55);
 }
 
 .cell.hit {
@@ -709,7 +710,7 @@ button.small-button {
 }
 
 /* ============================================================
-   SHIP / FLEET BUILDER  —  compact list, one row per ship
+   SHIP / FLEET BUILDER  —  compact list, draggable SVG per ship
    ============================================================ */
 .fleet-builder { gap: 0.9rem; }
 
@@ -723,33 +724,36 @@ button.small-button {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.65rem 0.85rem;
+  gap: 1rem;
+  padding: 0.7rem 0.9rem;
   background: var(--surface-1);
   border: 1px solid var(--line-strong);
   border-radius: var(--r);
   min-width: 0;
   cursor: grab;
+  min-height: 52px;
 }
 
 .fleet-row:active { cursor: grabbing; }
 
 .fleet-row.placed {
   border-color: var(--ship);
-  background: rgba(45, 212, 191, 0.06);
+  background: rgba(45, 212, 191, 0.08);
 }
 
-.fleet-row-info {
+.ship-graphic {
   display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
+  align-items: center;
+  justify-content: flex-start;
   min-width: 0;
-  flex: 1;
+  flex-shrink: 1;
+  overflow: hidden;
 }
 
-.fleet-row-info strong {
-  color: var(--ink-bright);
-  font-family: var(--font-display);
+.ship-svg {
+  display: block;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35));
+  pointer-events: none; /* clicks/drags go through to the fleet-row */
 }
 
 .fleet-row-actions {
