@@ -666,8 +666,8 @@ button.small-button {
 }
 
 .cell {
-  background: var(--bg-void);
-  border: 1px solid rgba(56, 189, 248, 0.12);
+  background: #0a1835;               /* dark navy water */
+  border: 1px solid rgba(96, 165, 250, 0.18);
   color: transparent;
   transition: background 100ms, border-color 100ms;
 }
@@ -678,24 +678,46 @@ button.small-button {
   border-color: var(--sonar);
 }
 
-.cell.ship {
-  background: var(--ship);
+/* ---- OWN BOARD ---- */
+/* Your placed ships: green */
+.board-self .cell.ship {
+  background: #22c55e;
   border-color: rgba(5, 8, 15, 0.55);
-  box-shadow: inset 0 0 0 1px rgba(45, 212, 191, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.6);
 }
 
-.cell.hit {
-  background: var(--hit-soft);
-  border-color: var(--hit);
+/* Your ship got hit: red */
+.board-self .cell.hit {
+  background: #ef4444;
+  border-color: #b91c1c;
+  box-shadow: none;
 }
-.cell.hit::after { content: "✕"; color: var(--hit); font-weight: 700; }
+.board-self .cell.hit::after { content: "✕"; color: #fff; font-weight: 700; }
 
-.cell.sunk {
-  background: var(--sunk-soft);
-  border-color: var(--sunk);
+/* Your fleet is fully sunk: dark red */
+.board-self .cell.sunk {
+  background: #7f1d1d;
+  border-color: #450a0a;
+  box-shadow: none;
 }
-.cell.sunk::after { content: "✕"; color: var(--sunk); font-weight: 700; }
+.board-self .cell.sunk::after { content: "✕"; color: #fca5a5; font-weight: 700; }
 
+/* ---- OPPONENT BOARD ---- */
+/* You hit an enemy ship: orange */
+.board-target .cell.hit {
+  background: #f97316;
+  border-color: #9a3412;
+}
+.board-target .cell.hit::after { content: "✕"; color: #fff7ed; font-weight: 700; }
+
+/* You sunk the enemy's fleet: all their hit cells go red */
+.board-target .cell.sunk {
+  background: #ef4444;
+  border-color: #7f1d1d;
+}
+.board-target .cell.sunk::after { content: "✕"; color: #fff; font-weight: 700; }
+
+/* ---- SHARED ---- */
 .cell.miss {
   background: var(--miss-soft);
   border-color: var(--miss);
