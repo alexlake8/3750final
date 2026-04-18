@@ -1342,22 +1342,48 @@ function renderMyBoardCard() {
 }
 
 
+function renderShipSvg(length, orientation) {
+  const seg = 22;          // pixels per cell segment
+  const thickness = 20;    // short-axis thickness of the hull
+  const long = length * seg;
+  const vertical = orientation === 'vertical';
+  const w = vertical ? thickness : long;
+  const h = vertical ? long : thickness;
+  const nose = seg * 0.55;
+
+  // Hull path: rounded rectangle with one pointed end (bow).
+  const hull = vertical
+    ? `M ${w / 2} 0 L ${w} ${nose} L ${w} ${h - 3} Q ${w} ${h} ${w - 3} ${h} L 3 ${h} Q 0 ${h} 0 ${h - 3} L 0 ${nose} Z`
+    : `M ${w} ${h / 2} L ${w - nose} 0 L 3 0 Q 0 0 0 3 L 0 ${h - 3} Q 0 ${h} 3 ${h} L ${w - nose} ${h} Z`;
+
+  // Bridge / tower centered on the hull.
+  const tw = vertical ? 8 : 12;
+  const th = vertical ? 12 : 8;
+  const tx = (w - tw) / 2;
+  const ty = (h - th) / 2;
+
+  return `
+    <svg class="ship-svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <path d="${hull}" fill="var(--ship)" stroke="rgba(5, 8, 15, 0.55)" stroke-width="1.2" stroke-linejoin="round" />
+      <rect x="${tx}" y="${ty}" width="${tw}" height="${th}" fill="rgba(5, 8, 15, 0.6)" rx="1.5" />
+    </svg>
+  `;
+}
+
 function renderFleetBuilder() {
   return `
     <div class="fleet-builder stack">
       <div class="callout">
         <strong>Place your fleet</strong>
-        <div class="small">Drag a ship row onto your board. Use Rotate to switch orientation.</div>
+        <div class="small">Drag each ship onto your board. Use Rotate to switch orientation.</div>
       </div>
       <div class="fleet-list">
         ${state.pendingFleet.map((ship) => {
           const placed = isPendingShipPlaced(ship);
-          const status = placed ? `at (${ship.row}, ${ship.col})` : 'not placed';
           return `
-            <div class="fleet-row ${placed ? 'placed' : ''}" draggable="true" data-draggable-ship-id="${ship.id}">
-              <div class="fleet-row-info">
-                <strong>${escapeHtml(ship.name)}</strong>
-                <div class="small">Length ${ship.length} • ${escapeHtml(ship.orientation)} • ${escapeHtml(status)}</div>
+            <div class="fleet-row ${placed ? 'placed' : ''} ${ship.orientation}" draggable="true" data-draggable-ship-id="${ship.id}">
+              <div class="ship-graphic">
+                ${renderShipSvg(ship.length, ship.orientation)}
               </div>
               <div class="fleet-row-actions">
                 <button type="button" class="ghost small-button" data-action="rotate-pending-ship" data-ship-id="${ship.id}">Rotate</button>
