@@ -105,16 +105,16 @@ label {
   align-items: start;
 }
 
-.identity-col { grid-area: identity; }
-.lobby-col    { grid-area: lobby; }
-.game-col     { grid-area: game; }
+.identity-col { grid-area: identity; min-width: 0; }
+.lobby-col    { grid-area: lobby;    min-width: 0; }
+.game-col     { grid-area: game;     min-width: 0; }
 
 .panel {
   background: rgba(20, 28, 51, 0.95);
   border: 1px solid var(--border);
   border-radius: 18px;
   padding: 1rem;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .stack {
