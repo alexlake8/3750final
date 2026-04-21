@@ -16,11 +16,17 @@ https://three750final-1.onrender.com
 
 Endpoints:
 POST /reset – Reset all data
+
 POST /players – Create a player
+
 GET /players/{id}/stats – View player stats
+
 POST /games – Create a game
+
 POST /games/{id}/join – Join a game
+
 GET /games/{id} – View game state
+
 POST /games/{id}/fire – Make a move
 
 Team Members:
