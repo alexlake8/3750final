@@ -15,6 +15,7 @@ Frontend Site:
 https://three750final-1.onrender.com
 
 Endpoints:
+
 POST /reset – Reset all data
 
 POST /players – Create a player
