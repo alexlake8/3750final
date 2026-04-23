@@ -974,8 +974,11 @@ function moveAtForTarget(targetPlayerId, row, col) {
 }
 
 function canFireAt(targetPlayerId, row, col) {
-  const normalizedTargetPlayerId = Number(targetPlayerId);
-  const opponent = state.currentGame?.players?.find((player) => player.player_id === normalizedTargetPlayerId);
+  const normalizedTargetPlayerId = String(targetPlayerId);
+  const opponent = state.currentGame?.players?.find(
+    (player) => String(player.player_id) === normalizedTargetPlayerId
+  );
+
   return Boolean(
     isMyTurn() &&
       opponent &&
