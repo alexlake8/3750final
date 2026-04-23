@@ -51,6 +51,65 @@
   --r-lg: 14px;
 }
 
+:root[data-theme="light"] {
+  --bg: #f4f7fb;
+  --panel: #ffffff;
+  --panel-soft: #eef4fb;
+  --panel-strong: #dbeafe;
+  --text: #102033;
+  --muted: #52677f;
+  --border: #c8d7ea;
+  --accent: #0ea5e9;
+  --accent-strong: #0284c7;
+  --success: #047857;
+  --danger: #dc2626;
+  --warning: #ca8a04;
+  --cell: #38bdf8;
+  --cell-dark: #0ea5e9;
+  --ship: #16a34a;
+}
+:root[data-theme="light"] body {
+  background:
+    linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px),
+    var(--bg);
+  color: var(--text);
+}
+
+:root[data-theme="light"] input,
+:root[data-theme="light"] select {
+  background: #ffffff;
+  color: var(--text);
+  border-color: var(--border);
+}
+
+:root[data-theme="light"] .panel,
+:root[data-theme="light"] .board-card,
+:root[data-theme="light"] .game-card,
+:root[data-theme="light"] .summary-card,
+:root[data-theme="light"] .stat,
+:root[data-theme="light"] .player-pill,
+:root[data-theme="light"] .log-item {
+  background: var(--panel);
+  border-color: var(--border);
+}
+
+:root[data-theme="light"] .cell {
+  background: #38bdf8;
+}
+
+:root[data-theme="light"] .cell.ship {
+  background: #16a34a;
+}
+
+:root[data-theme="light"] .cell.hit,
+:root[data-theme="light"] .cell.sunk {
+  background: #dc2626;
+}
+
+:root[data-theme="light"] .cell.miss {
+  background: #93c5fd;
+}
 /* ============================================================
    RESET + BASE
    ============================================================ */
