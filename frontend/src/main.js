@@ -383,6 +383,7 @@ async function handleClick(event) {
   try {
     const action = target.dataset.action;
 
+    // ✅ THEME TOGGLE
     if (action === 'toggle-theme') {
       state.theme = state.theme === 'dark' ? 'light' : 'dark';
       document.documentElement.dataset.theme = state.theme;
@@ -390,6 +391,136 @@ async function handleClick(event) {
       render();
       return;
     }
+
+    // ✅ PAGE NAVIGATION
+    if (action === 'go-game-view') {
+      state.currentView = 'game';
+      persistLocalState();
+      render();
+      return;
+    }
+
+    if (action === 'go-stats-view') {
+      state.currentView = 'stats';
+      persistLocalState();
+      render();
+      return;
+    }
+
+    // ✅ PAGINATION
+    if (action === 'prev-page') {
+      if (state.currentPage > 1) {
+        state.currentPage -= 1;
+        render();
+      }
+      return;
+    }
+
+    if (action === 'next-page') {
+      const totalPages = Math.max(1, Math.ceil(state.games.length / (state.gamesPerPage || 5)));
+      if (state.currentPage < totalPages) {
+        state.currentPage += 1;
+        render();
+      }
+      return;
+    }
+
+    // ✅ SESSION
+    if (action === 'clear-session') {
+      stopPolling();
+      clearState();
+      render();
+      await refreshLobby();
+      await refreshLeaderboard();
+      return;
+    }
+
+    if (action === 'refresh-all') {
+      await refreshAll();
+      return;
+    }
+
+    // ✅ GAME ACTIONS
+    if (action === 'join-game') {
+      await joinGame(Number(target.dataset.gameId));
+      return;
+    }
+
+    if (action === 'copy-game-id') {
+      await copyText(target.dataset.gameId || state.activeGameId);
+      showSuccess(`Game ID ${target.dataset.gameId || state.activeGameId} copied`);
+      return;
+    }
+
+    if (action === 'open-game') {
+      const nextGameId = Number(target.dataset.gameId);
+      if (state.activeGameId !== nextGameId) {
+        state.myShips = [];
+        state.pendingFleet = createDefaultFleet();
+        syncPendingShipsFromFleet();
+        state.moveHistory = [];
+      }
+      state.activeGameId = nextGameId;
+      persistLocalState();
+      await refreshCurrentGame(true);
+      startPolling();
+      showSuccess(`Opened game ${state.activeGameId}`);
+      return;
+    }
+
+    if (action === 'leave-current-game') {
+      stopPolling();
+      state.activeGameId = null;
+      state.currentGame = null;
+      state.myShips = [];
+      state.pendingFleet = createDefaultFleet();
+      syncPendingShipsFromFleet();
+      state.moveHistory = [];
+      persistLocalState();
+      render();
+      return;
+    }
+
+    // ✅ SHIPS
+    if (action === 'rotate-pending-ship') {
+      rotatePendingShip(target.dataset.shipId);
+      return;
+    }
+
+    if (action === 'reset-pending-ship') {
+      resetPendingShip(target.dataset.shipId);
+      return;
+    }
+
+    if (action === 'clear-pending-ships') {
+      clearPendingFleet();
+      return;
+    }
+
+    if (action === 'submit-ships') {
+      await submitShips();
+      return;
+    }
+
+    if (action === 'start-game') {
+      await startCurrentGame();
+      return;
+    }
+
+    // ✅ FIRE
+    if (action === 'fire-shot') {
+      await fireShot(
+        Number(target.dataset.row),
+        Number(target.dataset.col),
+        Number(target.dataset.targetPlayerId)
+      );
+      return;
+    }
+
+  } catch (error) {
+    showError(error.message);
+  }
+}
 
 async function refreshAll() {
   await refreshLobby();
