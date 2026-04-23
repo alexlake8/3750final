@@ -216,6 +216,12 @@ function handleDragStart(event) {
 
   event.dataTransfer.setData('text/plain', ship.dataset.draggableShipId);
   event.dataTransfer.effectAllowed = 'move';
+
+  // FIX 2: hide the browser's default drag ghost/PNG preview
+  const ghost = document.createElement('canvas');
+  ghost.width = 1;
+  ghost.height = 1;
+  event.dataTransfer.setDragImage(ghost, 0, 0);
 }
 
 function handleDragOver(event) {
@@ -1443,7 +1449,6 @@ function renderBoard({ boardType, playerId }) {
 
 function renderCell({ boardType, playerId, row, col }) {
   const classes = ['cell'];
-  let label = '';
   let attrs = '';
 
   const targetedPlayer = state.currentGame?.players?.find((p) => p.player_id === playerId);
@@ -1456,15 +1461,12 @@ function renderCell({ boardType, playerId, row, col }) {
 
     if (hasShip) {
       classes.push('ship');
-      label = 'S';
     }
 
     if (incomingMove) {
       const wasHit = incomingMove.result === 'hit' || incomingMove.result === 'sunk';
-      // If my whole fleet is gone, paint hit cells as sunk (dark red).
       const impactClass = wasHit ? (playerEliminated ? 'sunk' : 'hit') : 'miss';
       classes.push(impactClass);
-      label = impactClass === 'miss' ? '•' : 'X';
     }
 
     if (getCurrentPlayer() && !myPlacementSubmitted() && state.currentGame?.status === 'waiting') {
@@ -1480,10 +1482,8 @@ function renderCell({ boardType, playerId, row, col }) {
 
     if (move) {
       const wasHit = move.result === 'hit' || move.result === 'sunk';
-      // When the opponent is fully eliminated, paint all their hit cells red ("sunk").
       const impactClass = wasHit ? (playerEliminated ? 'sunk' : 'hit') : 'miss';
       classes.push(impactClass);
-      label = impactClass === 'miss' ? '•' : 'X';
     }
 
     if (canFireAt(playerId, row, col)) {
@@ -1494,7 +1494,8 @@ function renderCell({ boardType, playerId, row, col }) {
     }
   }
 
-  return `<button class="${classes.join(' ')}" ${attrs} ${attrs ? '' : 'disabled'}>${label}</button>`;
+  // FIX 1: render no inner text so CSS markers do not duplicate with text labels
+  return `<button class="${classes.join(' ')}" ${attrs} ${attrs ? '' : 'disabled'} aria-label="row ${row}, col ${col}"></button>`;
 }
 
 function renderMoveHistory() {
