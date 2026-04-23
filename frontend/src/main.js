@@ -216,12 +216,6 @@ function handleDragStart(event) {
 
   event.dataTransfer.setData('text/plain', ship.dataset.draggableShipId);
   event.dataTransfer.effectAllowed = 'move';
-
-  // FIX 2: hide the browser's default drag ghost/PNG preview
-  const ghost = document.createElement('canvas');
-  ghost.width = 1;
-  ghost.height = 1;
-  event.dataTransfer.setDragImage(ghost, 0, 0);
 }
 
 function handleDragOver(event) {
@@ -482,12 +476,14 @@ async function handleClick(event) {
       return;
     }
 
-    function boardMovesForTarget(targetPlayerId) {
-  const normalizedTargetPlayerId = String(targetPlayerId);
-  return state.moveHistory.filter(
-    (move) => String(move.target_player_id) === normalizedTargetPlayerId
-  );
-}
+    if (action === 'fire-shot') {
+      await fireShot(
+        Number(target.dataset.row),
+        Number(target.dataset.col),
+        Number(target.dataset.targetPlayerId)
+      );
+      return;
+    }
   } catch (error) {
     showError(error.message);
   }
@@ -968,18 +964,12 @@ function boardMovesForTarget(targetPlayerId) {
 }
 
 function moveAtForTarget(targetPlayerId, row, col) {
-  const normalizedTargetPlayerId = String(targetPlayerId);
-  return boardMovesForTarget(normalizedTargetPlayerId).find(
-    (move) => move.row === row && move.col === col
-  ) || null;
+  return boardMovesForTarget(targetPlayerId).find((move) => move.row === row && move.col === col) || null;
 }
 
 function canFireAt(targetPlayerId, row, col) {
-  const normalizedTargetPlayerId = String(targetPlayerId);
-  const opponent = state.currentGame?.players?.find(
-    (player) => String(player.player_id) === normalizedTargetPlayerId
-  );
-
+  const normalizedTargetPlayerId = Number(targetPlayerId);
+  const opponent = state.currentGame?.players?.find((player) => player.player_id === normalizedTargetPlayerId);
   return Boolean(
     isMyTurn() &&
       opponent &&
@@ -1453,6 +1443,7 @@ function renderBoard({ boardType, playerId }) {
 
 function renderCell({ boardType, playerId, row, col }) {
   const classes = ['cell'];
+  let label = '';
   let attrs = '';
 
   const targetedPlayer = state.currentGame?.players?.find((p) => p.player_id === playerId);
@@ -1465,12 +1456,15 @@ function renderCell({ boardType, playerId, row, col }) {
 
     if (hasShip) {
       classes.push('ship');
+      label = 'S';
     }
 
     if (incomingMove) {
       const wasHit = incomingMove.result === 'hit' || incomingMove.result === 'sunk';
+      // If my whole fleet is gone, paint hit cells as sunk (dark red).
       const impactClass = wasHit ? (playerEliminated ? 'sunk' : 'hit') : 'miss';
       classes.push(impactClass);
+      label = impactClass === 'miss' ? '•' : 'X';
     }
 
     if (getCurrentPlayer() && !myPlacementSubmitted() && state.currentGame?.status === 'waiting') {
@@ -1485,19 +1479,12 @@ function renderCell({ boardType, playerId, row, col }) {
     const move = moveAtForTarget(playerId, row, col);
 
     if (move) {
-  // remove any previous result classes first
-  classes.splice(classes.indexOf('hit'), 1);
-  classes.splice(classes.indexOf('miss'), 1);
-  classes.splice(classes.indexOf('sunk'), 1);
-
-  if (move.result === 'miss') {
-    classes.push('miss');
-  } else if (move.result === 'sunk') {
-    classes.push('sunk');
-  } else {
-    classes.push('hit');
-  }
-}
+      const wasHit = move.result === 'hit' || move.result === 'sunk';
+      // When the opponent is fully eliminated, paint all their hit cells red ("sunk").
+      const impactClass = wasHit ? (playerEliminated ? 'sunk' : 'hit') : 'miss';
+      classes.push(impactClass);
+      label = impactClass === 'miss' ? '•' : 'X';
+    }
 
     if (canFireAt(playerId, row, col)) {
       classes.push('interactive');
@@ -1507,8 +1494,7 @@ function renderCell({ boardType, playerId, row, col }) {
     }
   }
 
-  // FIX 1: render no inner text so CSS markers do not duplicate with text labels
-  return `<button class="${classes.join(' ')}" ${attrs} ${attrs ? '' : 'disabled'} aria-label="row ${row}, col ${col}"></button>`;
+  return `<button class="${classes.join(' ')}" ${attrs} ${attrs ? '' : 'disabled'}>${label}</button>`;
 }
 
 function renderMoveHistory() {
