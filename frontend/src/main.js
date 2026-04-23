@@ -216,11 +216,24 @@ function handleDragStart(event) {
 
   event.dataTransfer.setData('text/plain', ship.dataset.draggableShipId);
   event.dataTransfer.effectAllowed = 'move';
+
+  // Hide the browser's default drag ghost
+  const ghost = document.createElement('canvas');
+  ghost.width = 1;
+  ghost.height = 1;
+  event.dataTransfer.setDragImage(ghost, 0, 0);
+}
+
+function clearDropPreview() {
+  document
+    .querySelectorAll('.cell.preview-valid, .cell.preview-invalid')
+    .forEach((cell) => cell.classList.remove('preview-valid', 'preview-invalid'));
 }
 
 function handleDragOver(event) {
   const dropCell = event.target.closest('[data-drop-ship-cell="true"]');
   if (!dropCell) {
+    clearDropPreview();
     return;
   }
 
@@ -228,17 +241,48 @@ function handleDragOver(event) {
   if (event.dataTransfer) {
     event.dataTransfer.dropEffect = 'move';
   }
+
+  const shipId = event.dataTransfer?.getData('text/plain');
+  const ship = getPendingShipById(shipId);
+  if (!ship) {
+    clearDropPreview();
+    return;
+  }
+
+  clearDropPreview();
+
+  const row = Number(dropCell.dataset.row);
+  const col = Number(dropCell.dataset.col);
+  const previewCells = getShipCells(ship, ship.orientation, row, col);
+
+  let valid = true;
+  try {
+    validatePendingShipPlacement(ship, row, col, ship.orientation);
+  } catch {
+    valid = false;
+  }
+
+  for (const previewCell of previewCells) {
+    const el = document.querySelector(
+      `.board-self .cell[data-drop-ship-cell="true"][data-row="${previewCell.row}"][data-col="${previewCell.col}"]`
+    );
+    if (el) {
+      el.classList.add(valid ? 'preview-valid' : 'preview-invalid');
+    }
+  }
 }
 
 function handleDrop(event) {
   const dropCell = event.target.closest('[data-drop-ship-cell="true"]');
   if (!dropCell) {
+    clearDropPreview();
     return;
   }
 
   event.preventDefault();
   const shipId = event.dataTransfer?.getData('text/plain');
   if (!shipId) {
+    clearDropPreview();
     return;
   }
 
@@ -247,7 +291,59 @@ function handleDrop(event) {
     placePendingShip(shipId, Number(dropCell.dataset.row), Number(dropCell.dataset.col));
   } catch (error) {
     showError(error.message);
+  } finally {
+    clearDropPreview();
   }
+}
+
+function renderCell({ boardType, playerId, row, col }) {
+  const classes = ['cell'];
+  let attrs = '';
+
+  const targetedPlayer = state.currentGame?.players?.find((p) => p.player_id === playerId);
+  const playerEliminated = Boolean(targetedPlayer?.eliminated);
+
+  if (boardType === 'self') {
+    const liveShipCells = myPlacementSubmitted() ? state.myShips : state.pendingShips;
+    const hasShip = liveShipCells.some((ship) => ship.row === row && ship.col === col);
+    const incomingMove = moveAtForTarget(playerId, row, col);
+
+    if (hasShip) {
+      classes.push('ship');
+    }
+
+    if (incomingMove) {
+      const wasHit = incomingMove.result === 'hit' || incomingMove.result === 'sunk';
+      const impactClass = wasHit ? (playerEliminated ? 'sunk' : 'hit') : 'miss';
+      classes.push(impactClass);
+    }
+
+    if (getCurrentPlayer() && !myPlacementSubmitted() && state.currentGame?.status === 'waiting') {
+      classes.push('interactive', 'droppable');
+      attrs = `data-drop-ship-cell="true" data-row="${row}" data-col="${col}"`;
+    } else {
+      classes.push('disabled');
+    }
+  }
+
+  if (boardType === 'target') {
+    const move = moveAtForTarget(playerId, row, col);
+
+    if (move) {
+      const wasHit = move.result === 'hit' || move.result === 'sunk';
+      const impactClass = wasHit ? (playerEliminated ? 'sunk' : 'hit') : 'miss';
+      classes.push(impactClass);
+    }
+
+    if (canFireAt(playerId, row, col)) {
+      classes.push('interactive');
+      attrs = `data-action="fire-shot" data-row="${row}" data-col="${col}" data-target-player-id="${playerId}"`;
+    } else {
+      classes.push('disabled');
+    }
+  }
+
+  return `<button class="${classes.join(' ')}" ${attrs} ${attrs ? '' : 'disabled'} aria-label="row ${row}, col ${col}"></button>`;
 }
 
 function captureRenderState() {
