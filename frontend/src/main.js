@@ -373,13 +373,6 @@ async function handleSubmit(event) {
 
 async function handleClick(event) {
   const target = event.target.closest('[data-action]');
-  if (action === 'toggle-theme') {
-  state.theme = state.theme === 'dark' ? 'light' : 'dark';
-  document.documentElement.dataset.theme = state.theme;
-  persistLocalState();
-  render();
-  return;
-  }
   if (!target) {
     return;
   }
@@ -390,128 +383,13 @@ async function handleClick(event) {
   try {
     const action = target.dataset.action;
 
-    if (action === 'go-game-view') {
-      state.currentView = 'game';
+    if (action === 'toggle-theme') {
+      state.theme = state.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = state.theme;
       persistLocalState();
       render();
       return;
     }
-
-    if (action === 'go-stats-view') {
-      state.currentView = 'stats';
-      persistLocalState();
-      render();
-      return;
-    }
-
-    if (action === 'prev-page') {
-      if (state.currentPage > 1) {
-        state.currentPage -= 1;
-        render();
-      }
-      return;
-    }
-
-    if (action === 'next-page') {
-      const totalPages = Math.max(1, Math.ceil(state.games.length / (state.gamesPerPage || 5)));
-      if (state.currentPage < totalPages) {
-        state.currentPage += 1;
-        render();
-      }
-      return;
-    }
-
-    if (action === 'clear-session') {
-      stopPolling();
-      clearState();
-      render();
-      await refreshLobby();
-      await refreshLeaderboard();
-      return;
-    }
-
-    if (action === 'refresh-all') {
-      await refreshAll();
-      return;
-    }
-
-    if (action === 'join-game') {
-      await joinGame(Number(target.dataset.gameId));
-      return;
-    }
-
-    if (action === 'copy-game-id') {
-      await copyText(target.dataset.gameId || state.activeGameId);
-      showSuccess(`Game ID ${target.dataset.gameId || state.activeGameId} copied`);
-      return;
-    }
-
-    if (action === 'open-game') {
-      const nextGameId = Number(target.dataset.gameId);
-      if (state.activeGameId !== nextGameId) {
-        state.myShips = [];
-        state.pendingFleet = createDefaultFleet();
-        syncPendingShipsFromFleet();
-        state.moveHistory = [];
-      }
-      state.activeGameId = nextGameId;
-      persistLocalState();
-      await refreshCurrentGame(true);
-      startPolling();
-      showSuccess(`Opened game ${state.activeGameId}`);
-      return;
-    }
-
-    if (action === 'leave-current-game') {
-      stopPolling();
-      state.activeGameId = null;
-      state.currentGame = null;
-      state.myShips = [];
-      state.pendingFleet = createDefaultFleet();
-      syncPendingShipsFromFleet();
-      state.moveHistory = [];
-      persistLocalState();
-      render();
-      return;
-    }
-
-    if (action === 'rotate-pending-ship') {
-      rotatePendingShip(target.dataset.shipId);
-      return;
-    }
-
-    if (action === 'reset-pending-ship') {
-      resetPendingShip(target.dataset.shipId);
-      return;
-    }
-
-    if (action === 'clear-pending-ships') {
-      clearPendingFleet();
-      return;
-    }
-
-    if (action === 'submit-ships') {
-      await submitShips();
-      return;
-    }
-
-    if (action === 'start-game') {
-      await startCurrentGame();
-      return;
-    }
-
-    if (action === 'fire-shot') {
-      await fireShot(
-        Number(target.dataset.row),
-        Number(target.dataset.col),
-        Number(target.dataset.targetPlayerId)
-      );
-      return;
-    }
-  } catch (error) {
-    showError(error.message);
-  }
-}
 
 async function refreshAll() {
   await refreshLobby();
@@ -562,12 +440,15 @@ function persistLocalState() {
 function loadLocalState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
+
     if (!raw) {
-      state.theme = parsed.theme || 'dark';
+      state.theme = 'dark';
       document.documentElement.dataset.theme = state.theme;
       return;
     }
+
     const parsed = JSON.parse(raw);
+
     state.username = parsed.username || '';
     state.playerId = parsed.playerId || null;
     state.activeGameId = parsed.activeGameId || null;
@@ -575,6 +456,9 @@ function loadLocalState() {
     syncPendingShipsFromFleet();
     state.joinGameIdDraft = parsed.joinGameIdDraft || '';
     state.currentView = parsed.currentView || (state.playerId ? 'game' : 'auth');
+
+    state.theme = parsed.theme || 'dark';
+    document.documentElement.dataset.theme = state.theme;
   } catch {
     localStorage.removeItem(STORAGE_KEY);
   }
