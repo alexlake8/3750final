@@ -666,68 +666,119 @@ button.small-button {
 }
 
 .cell {
-  background: #0a1835;               /* dark navy water */
-  border: 1px solid rgba(96, 165, 250, 0.18);
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(180deg, #4fc3f7 0%, #39aee6 100%);
+  border: 1px solid rgba(96, 165, 250, 0.2);
   color: transparent;
-  transition: background 100ms, border-color 100ms;
+  transition: background 100ms, border-color 100ms, transform 100ms;
+}
+
+.cell::before,
+.cell::after {
+  pointer-events: none;
 }
 
 .cell.interactive { cursor: crosshair; }
 .cell.interactive:hover {
-  background: var(--sonar-soft);
+  background: linear-gradient(180deg, #67cdf9 0%, #48b8ec 100%);
   border-color: var(--sonar);
 }
 
-/* ---- OWN BOARD ---- */
-/* Your placed ships: green */
-.board-self .cell.ship {
-  background: #22c55e;
-  border-color: rgba(5, 8, 15, 0.55);
-  box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.6);
+.cell.preview-valid {
+  background: rgba(45, 212, 191, 0.22);
+  border-color: rgba(45, 212, 191, 0.8);
 }
 
-/* Your ship got hit: red */
+.cell.preview-invalid {
+  background: rgba(244, 63, 94, 0.18);
+  border-color: rgba(244, 63, 94, 0.75);
+}
+
+/* ---- OWN BOARD ---- */
+.board-self .cell.ship {
+  background: linear-gradient(180deg, #56e1cf 0%, #24c7b5 100%);
+  border-color: rgba(5, 8, 15, 0.3);
+}
+
+.board-self .cell.ship::before {
+  content: "";
+  position: absolute;
+  left: 20%;
+  right: 20%;
+  top: 42%;
+  height: 18%;
+  border-radius: 999px;
+  background: rgba(5, 8, 15, 0.18);
+}
+
+.board-self .cell.hit,
+.board-target .cell.hit,
+.board-self .cell.sunk,
+.board-target .cell.sunk,
+.cell.miss {
+  box-shadow: none;
+}
+
 .board-self .cell.hit {
   background: #ef4444;
   border-color: #b91c1c;
-  box-shadow: none;
 }
-.board-self .cell.hit::after { content: "✕"; color: #fff; font-weight: 700; }
 
-/* Your fleet is fully sunk: dark red */
 .board-self .cell.sunk {
   background: #7f1d1d;
   border-color: #450a0a;
-  box-shadow: none;
 }
-.board-self .cell.sunk::after { content: "✕"; color: #fca5a5; font-weight: 700; }
 
-/* ---- OPPONENT BOARD ---- */
-/* You hit an enemy ship: orange */
 .board-target .cell.hit {
   background: #f97316;
   border-color: #9a3412;
 }
-.board-target .cell.hit::after { content: "✕"; color: #fff7ed; font-weight: 700; }
 
-/* You sunk the enemy's fleet: all their hit cells go red */
 .board-target .cell.sunk {
   background: #ef4444;
   border-color: #7f1d1d;
 }
-.board-target .cell.sunk::after { content: "✕"; color: #fff; font-weight: 700; }
 
-/* ---- SHARED ---- */
+.board-self .cell.hit::after,
+.board-self .cell.sunk::after,
+.board-target .cell.hit::after,
+.board-target .cell.sunk::after {
+  content: "✕";
+  position: absolute;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -54%);
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.board-self .cell.sunk::after {
+  color: #fecaca;
+}
+
 .cell.miss {
-  background: var(--miss-soft);
+  background: rgba(100, 116, 139, 0.18);
   border-color: var(--miss);
 }
-.cell.miss::after { content: "·"; color: var(--miss); font-size: 1.3rem; line-height: 0; }
+
+.cell.miss::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(15, 23, 42, 0.7);
+  transform: translate(-50%, -50%);
+}
 
 .cell.disabled { opacity: 0.55; cursor: not-allowed; }
 
 .cell.droppable {
-  outline: 1px dashed rgba(56, 189, 248, 0.35);
+  outline: 1px dashed rgba(56, 189, 248, 0.25);
   outline-offset: -4px;
 }
 
@@ -756,6 +807,11 @@ button.small-button {
   min-height: 52px;
 }
 
+.fleet-row:hover {
+  border-color: rgba(56, 189, 248, 0.45);
+  background: rgba(56, 189, 248, 0.05);
+}
+
 .fleet-row:active { cursor: grabbing; }
 
 .fleet-row.placed {
@@ -774,8 +830,8 @@ button.small-button {
 
 .ship-svg {
   display: block;
-  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35));
-  pointer-events: none; /* clicks/drags go through to the fleet-row */
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.2));
+  pointer-events: none;
 }
 
 .fleet-row-actions {
