@@ -482,14 +482,12 @@ async function handleClick(event) {
       return;
     }
 
-    if (action === 'fire-shot') {
-      await fireShot(
-        Number(target.dataset.row),
-        Number(target.dataset.col),
-        Number(target.dataset.targetPlayerId)
-      );
-      return;
-    }
+    function boardMovesForTarget(targetPlayerId) {
+  const normalizedTargetPlayerId = String(targetPlayerId);
+  return state.moveHistory.filter(
+    (move) => String(move.target_player_id) === normalizedTargetPlayerId
+  );
+}
   } catch (error) {
     showError(error.message);
   }
@@ -970,7 +968,10 @@ function boardMovesForTarget(targetPlayerId) {
 }
 
 function moveAtForTarget(targetPlayerId, row, col) {
-  return boardMovesForTarget(targetPlayerId).find((move) => move.row === row && move.col === col) || null;
+  const normalizedTargetPlayerId = String(targetPlayerId);
+  return boardMovesForTarget(normalizedTargetPlayerId).find(
+    (move) => move.row === row && move.col === col
+  ) || null;
 }
 
 function canFireAt(targetPlayerId, row, col) {
