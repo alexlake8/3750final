@@ -372,28 +372,29 @@ async function handleSubmit(event) {
 
 async function handleClick(event) {
   const target = event.target.closest('[data-action]');
-  if (action === 'go-game-view') {
-    state.currentView = 'game';
-    persistLocalState();
-    render();
-    return;
-  }
-
-  if (action === 'go-stats-view') {
-    state.currentView = 'stats';
-    persistLocalState();
-    render();
-    return;
-  }
-  
   if (!target) {
     return;
   }
 
+  event.preventDefault();
   clearMessages();
 
   try {
     const action = target.dataset.action;
+
+    if (action === 'go-game-view') {
+      state.currentView = 'game';
+      persistLocalState();
+      render();
+      return;
+    }
+
+    if (action === 'go-stats-view') {
+      state.currentView = 'stats';
+      persistLocalState();
+      render();
+      return;
+    }
 
     if (action === 'prev-page') {
       if (state.currentPage > 1) {
@@ -1071,10 +1072,10 @@ function render() {
         <p>Lobby, multi-board battle view, live polling, move timeline, and leaderboard.</p>
       </div>
       <div class="actions">
-        <button class="${state.currentView === 'game' ? '' : 'ghost'}" data-action="go-game-view">Game</button>
-        <button class="${state.currentView === 'stats' ? '' : 'ghost'}" data-action="go-stats-view">Stats</button>
-        <button class="secondary" data-action="refresh-all">Refresh</button>
-        <button class="ghost" data-action="clear-session">Clear Session</button>
+        <button type="button" class="${state.currentView === 'game' ? '' : 'ghost'}" data-action="go-game-view">Game</button>
+        <button type="button" class="${state.currentView === 'stats' ? '' : 'ghost'}" data-action="go-stats-view">Stats</button>
+        <button type="button" class="secondary" data-action="refresh-all">Refresh</button>
+        <button type="button" class="ghost" data-action="clear-session">Clear Session</button>
       </div>
     </section>
 
@@ -1260,10 +1261,10 @@ function renderLobbyGames() {
             </div>
             <div class="game-actions">
               <span class="badge ${game.status === 'active' ? 'active' : ''}">${escapeHtml(game.status)}</span>
-              <button class="ghost" data-action="copy-game-id" data-game-id="${game.id}">Copy ID</button>
-              ${isCurrent ? `<button class="ghost" data-action="open-game" data-game-id="${game.id}">Open</button>` : ''}
-              ${!isCurrent ? `<button class="ghost" data-action="open-game" data-game-id="${game.id}">View</button>` : ''}
-              ${isOpen ? `<button data-action="join-game" data-game-id="${game.id}" ${!state.playerId ? 'disabled' : ''}>Join</button>` : ''}
+              <button type="button" class="ghost" data-action="copy-game-id" data-game-id="${game.id}">Copy ID</button>
+              ${isCurrent ? `<button type="button" class="ghost" data-action="open-game" data-game-id="${game.id}">Open</button>` : ''}
+              ${!isCurrent ? `<button type="button" class="ghost" data-action="open-game" data-game-id="${game.id}">View</button>` : ''}
+              ${isOpen ? `<button type="button" data-action="join-game" data-game-id="${game.id}" ${!state.playerId ? 'disabled' : ''}>Join</button>` : ''}
             </div>
           </div>
         `;
