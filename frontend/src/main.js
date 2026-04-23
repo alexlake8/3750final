@@ -1481,10 +1481,19 @@ function renderCell({ boardType, playerId, row, col }) {
     const move = moveAtForTarget(playerId, row, col);
 
     if (move) {
-      const wasHit = move.result === 'hit' || move.result === 'sunk';
-      const impactClass = wasHit ? (playerEliminated ? 'sunk' : 'hit') : 'miss';
-      classes.push(impactClass);
-    }
+  // remove any previous result classes first
+  classes.splice(classes.indexOf('hit'), 1);
+  classes.splice(classes.indexOf('miss'), 1);
+  classes.splice(classes.indexOf('sunk'), 1);
+
+  if (move.result === 'miss') {
+    classes.push('miss');
+  } else if (move.result === 'sunk') {
+    classes.push('sunk');
+  } else {
+    classes.push('hit');
+  }
+}
 
     if (canFireAt(playerId, row, col)) {
       classes.push('interactive');
