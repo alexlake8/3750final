@@ -72,3 +72,54 @@ body {
   left: 50%;
   transform: translate(-50%, -50%);
 }
+
+.cell {
+  position: relative;
+  overflow: hidden;
+}
+
+/* placement preview */
+.board-self .cell.preview-valid {
+  background: rgba(45, 212, 191, 0.28);
+  border-color: var(--ship);
+}
+
+.board-self .cell.preview-invalid {
+  background: rgba(244, 63, 94, 0.22);
+  border-color: var(--hit);
+}
+
+/* cleaner ships */
+.board-self .cell.ship {
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.02)),
+    linear-gradient(180deg, #34d399, #14b8a6);
+  border-color: rgba(5, 8, 15, 0.48);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.10);
+}
+
+/* center all markers once */
+.board-self .cell.hit::after,
+.board-self .cell.sunk::after,
+.board-target .cell.hit::after,
+.board-target .cell.sunk::after,
+.cell.miss::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.board-self .cell.hit::after,
+.board-self .cell.sunk::after,
+.board-target .cell.hit::after,
+.board-target .cell.sunk::after {
+  font-size: 1rem;
+}
+
+.cell.miss::after {
+  font-size: 1.1rem;
+}
