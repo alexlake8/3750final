@@ -20,6 +20,7 @@ const state = {
   joinGameIdDraft: '',
   currentPage: 1,
   gamesPerPage: 5,
+  currentView: 'auth',
 };
 
 loadLocalState();
@@ -216,13 +217,6 @@ function handleDragStart(event) {
 
   event.dataTransfer.setData('text/plain', ship.dataset.draggableShipId);
   event.dataTransfer.effectAllowed = 'move';
-
-  //FIX: remove ugly default drag image
-  const img = new Image();
-  img.src =
-    'data:image/svg+xml;base64,' +
-    btoa('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>');
-  event.dataTransfer.setDragImage(img, 0, 0);
 }
 
 function handleDragOver(event) {
@@ -378,6 +372,20 @@ async function handleSubmit(event) {
 
 async function handleClick(event) {
   const target = event.target.closest('[data-action]');
+  if (action === 'go-game-view') {
+    state.currentView = 'game';
+    persistLocalState();
+    render();
+    return;
+  }
+
+  if (action === 'go-stats-view') {
+    state.currentView = 'stats';
+    persistLocalState();
+    render();
+    return;
+  }
+  
   if (!target) {
     return;
   }
@@ -522,6 +530,7 @@ function clearState() {
   state.error = '';
   state.success = '';
   state.joinGameIdDraft = '';
+  state.currentView = 'auth';
   localStorage.removeItem(STORAGE_KEY);
 }
 
@@ -535,6 +544,7 @@ function persistLocalState() {
       pendingShips: state.pendingShips,
       pendingFleet: state.pendingFleet,
       joinGameIdDraft: state.joinGameIdDraft,
+      currentView: state.currentView,
     })
   );
 }
@@ -552,6 +562,7 @@ function loadLocalState() {
     state.pendingFleet = normalizePendingFleet(parsed.pendingFleet);
     syncPendingShipsFromFleet();
     state.joinGameIdDraft = parsed.joinGameIdDraft || '';
+    state.currentView = parsed.currentView || (state.playerId ? 'game' : 'auth');
   } catch {
     localStorage.removeItem(STORAGE_KEY);
   }
@@ -759,6 +770,7 @@ async function createOrLoadPlayer(formData) {
 
   state.username = result.username || username;
   state.playerId = result.id;
+  state.currentView = 'game';
   persistLocalState();
   await refreshStats();
   await refreshLeaderboard();
@@ -1021,6 +1033,36 @@ async function fireShot(row, col, targetPlayerId) {
 function render() {
   const app = document.getElementById('app');
   const snapshot = captureRenderState();
+
+  if (!state.playerId || state.currentView === 'auth') {
+    app.innerHTML = `
+      <section class="hero">
+        <div>
+          <div class="eyebrow">Phase 2 client</div>
+          <h1>Battleship Arena</h1>
+          <p>Create a player or load an existing one to enter the lobby.</p>
+        </div>
+      </section>
+
+      ${renderBanner()}
+
+      <main class="auth-shell">
+        <section class="panel stack auth-panel">
+          <h2>Player Sign In</h2>
+          <form id="player-form" class="stack">
+            <label>
+              Username
+              <input id="username" name="username" value="${escapeHtml(state.username)}" placeholder="Enter username" />
+            </label>
+            <button type="submit">Create / Load Player</button>
+          </form>
+        </section>
+      </main>
+    `;
+    restoreRenderState(snapshot);
+    return;
+  }
+
   app.innerHTML = `
     <section class="hero">
       <div>
@@ -1029,6 +1071,8 @@ function render() {
         <p>Lobby, multi-board battle view, live polling, move timeline, and leaderboard.</p>
       </div>
       <div class="actions">
+        <button class="${state.currentView === 'game' ? '' : 'ghost'}" data-action="go-game-view">Game</button>
+        <button class="${state.currentView === 'stats' ? '' : 'ghost'}" data-action="go-stats-view">Stats</button>
         <button class="secondary" data-action="refresh-all">Refresh</button>
         <button class="ghost" data-action="clear-session">Clear Session</button>
       </div>
@@ -1036,38 +1080,15 @@ function render() {
 
     ${renderBanner()}
 
+    ${state.currentView === 'stats' ? renderStatsPage() : renderGamePage()}
+  `;
+
+  restoreRenderState(snapshot);
+}
+
+function renderGamePage() {
+  return `
     <div class="layout">
-      <div class="sidebar">
-      <aside class="stack identity-col">
-        <section class="panel stack">
-          <h2>Player</h2>
-          <form id="player-form" class="stack">
-            <label>
-              Username
-              <input id="username" name="username" value="${escapeHtml(state.username)}" placeholder="Enter username" />
-            </label>
-            <button type="submit">Create / Load Player</button>
-          </form>
-          <div class="info-grid">
-            <div class="stat"><div class="label">Player ID</div><div class="value wrap">${escapeHtml(state.playerId || '—')}</div></div>
-            <div class="stat"><div class="label">Active Game ID</div><div class="value">${escapeHtml(state.activeGameId || '—')}</div></div>
-          </div>
-        </section>
-
-        <section class="panel stack">
-          <h2>Your Stats</h2>
-          ${renderMyStats()}
-        </section>
-
-        <section class="panel stack">
-          <div class="section-head">
-            <h2>Leaderboard</h2>
-            <span class="badge">Top ${Math.min(5, state.leaderboard.length)}</span>
-          </div>
-          ${renderLeaderboard()}
-        </section>
-      </aside>
-
       <aside class="stack lobby-col">
         <section class="panel stack">
           <h2>Create Game</h2>
@@ -1109,7 +1130,6 @@ function render() {
           ${renderLobbyGames()}
         </section>
       </aside>
-      </div>
 
       <main class="stack game-col">
         <section class="panel stack">
@@ -1142,13 +1162,44 @@ function render() {
         ` : `
           <section class="panel empty-state">
             <h2>No Game Open</h2>
-            <p>Create a new lobby or join one from the list on the left.</p>
+            <p>Create a new lobby or join one from the left.</p>
           </section>
         `}
       </main>
     </div>
   `;
-  restoreRenderState(snapshot);
+}
+
+function renderStatsPage() {
+  return `
+    <div class="layout">
+      <aside class="stack identity-col">
+        <section class="panel stack">
+          <h2>Player</h2>
+          <div class="info-grid">
+            <div class="stat"><div class="label">Username</div><div class="value wrap">${escapeHtml(state.username || '—')}</div></div>
+            <div class="stat"><div class="label">Player ID</div><div class="value wrap">${escapeHtml(state.playerId || '—')}</div></div>
+            <div class="stat"><div class="label">Active Game ID</div><div class="value">${escapeHtml(state.activeGameId || '—')}</div></div>
+          </div>
+        </section>
+      </aside>
+
+      <main class="stack game-col">
+        <section class="panel stack">
+          <h2>Your Stats</h2>
+          ${renderMyStats()}
+        </section>
+
+        <section class="panel stack">
+          <div class="section-head">
+            <h2>Leaderboard</h2>
+            <span class="badge">Top ${Math.min(5, state.leaderboard.length)}</span>
+          </div>
+          ${renderLeaderboard()}
+        </section>
+      </main>
+    </div>
+  `;
 }
 
 function renderBanner() {
@@ -1450,6 +1501,7 @@ function renderBoard({ boardType, playerId }) {
 
 function renderCell({ boardType, playerId, row, col }) {
   const classes = ['cell'];
+  let label = '';
   let attrs = '';
 
   const targetedPlayer = state.currentGame?.players?.find((p) => p.player_id === playerId);
@@ -1462,12 +1514,15 @@ function renderCell({ boardType, playerId, row, col }) {
 
     if (hasShip) {
       classes.push('ship');
+      label = 'S';
     }
 
     if (incomingMove) {
       const wasHit = incomingMove.result === 'hit' || incomingMove.result === 'sunk';
+      // If my whole fleet is gone, paint hit cells as sunk (dark red).
       const impactClass = wasHit ? (playerEliminated ? 'sunk' : 'hit') : 'miss';
       classes.push(impactClass);
+      label = impactClass === 'miss' ? '•' : 'X';
     }
 
     if (getCurrentPlayer() && !myPlacementSubmitted() && state.currentGame?.status === 'waiting') {
@@ -1483,8 +1538,10 @@ function renderCell({ boardType, playerId, row, col }) {
 
     if (move) {
       const wasHit = move.result === 'hit' || move.result === 'sunk';
+      // When the opponent is fully eliminated, paint all their hit cells red ("sunk").
       const impactClass = wasHit ? (playerEliminated ? 'sunk' : 'hit') : 'miss';
       classes.push(impactClass);
+      label = impactClass === 'miss' ? '•' : 'X';
     }
 
     if (canFireAt(playerId, row, col)) {
@@ -1495,7 +1552,7 @@ function renderCell({ boardType, playerId, row, col }) {
     }
   }
 
-  return `<button class="${classes.join(' ')}" ${attrs} ${attrs ? '' : 'disabled'}></button>`;
+  return `<button class="${classes.join(' ')}" ${attrs} ${attrs ? '' : 'disabled'}>${label}</button>`;
 }
 
 function renderMoveHistory() {
