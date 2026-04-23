@@ -21,6 +21,7 @@ const state = {
   currentPage: 1,
   gamesPerPage: 5,
   currentView: 'auth',
+  theme: 'dark',
 };
 
 loadLocalState();
@@ -372,6 +373,13 @@ async function handleSubmit(event) {
 
 async function handleClick(event) {
   const target = event.target.closest('[data-action]');
+  if (action === 'toggle-theme') {
+  state.theme = state.theme === 'dark' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = state.theme;
+  persistLocalState();
+  render();
+  return;
+  }
   if (!target) {
     return;
   }
@@ -546,6 +554,7 @@ function persistLocalState() {
       pendingFleet: state.pendingFleet,
       joinGameIdDraft: state.joinGameIdDraft,
       currentView: state.currentView,
+      theme: state.theme,
     })
   );
 }
@@ -554,6 +563,8 @@ function loadLocalState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) {
+      state.theme = parsed.theme || 'dark';
+      document.documentElement.dataset.theme = state.theme;
       return;
     }
     const parsed = JSON.parse(raw);
@@ -1074,8 +1085,12 @@ function render() {
       <div class="actions">
         <button type="button" class="${state.currentView === 'game' ? '' : 'ghost'}" data-action="go-game-view">Game</button>
         <button type="button" class="${state.currentView === 'stats' ? '' : 'ghost'}" data-action="go-stats-view">Stats</button>
+        <button type="button" data-action="toggle-theme">
+          ${state.theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
+        </button>
         <button type="button" class="secondary" data-action="refresh-all">Refresh</button>
         <button type="button" class="ghost" data-action="clear-session">Clear Session</button>
+        
       </div>
     </section>
 
