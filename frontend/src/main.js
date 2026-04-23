@@ -216,6 +216,13 @@ function handleDragStart(event) {
 
   event.dataTransfer.setData('text/plain', ship.dataset.draggableShipId);
   event.dataTransfer.effectAllowed = 'move';
+
+  //FIX: remove ugly default drag image
+  const img = new Image();
+  img.src =
+    'data:image/svg+xml;base64,' +
+    btoa('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>');
+  event.dataTransfer.setDragImage(img, 0, 0);
 }
 
 function handleDragOver(event) {
