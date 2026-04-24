@@ -85,7 +85,7 @@ async function initDb() {
       id BIGSERIAL PRIMARY KEY,
       creator_id UUID REFERENCES players(id) ON DELETE SET NULL,
       grid_size INTEGER NOT NULL CHECK (grid_size BETWEEN 5 AND 15),
-      max_players INTEGER NOT NULL CHECK (max_players BETWEEN 1 AND 50),
+      max_players INTEGER NOT NULL CHECK (max_players BETWEEN 2 AND 10),
       status TEXT NOT NULL CHECK (status IN ('waiting', 'active', 'finished')),
       current_turn_index INTEGER NOT NULL DEFAULT 0,
       winner_id UUID REFERENCES players(id) ON DELETE SET NULL,
