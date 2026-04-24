@@ -984,3 +984,67 @@ button.small-button {
   font-family: var(--font-mono);
   font-weight: 800;
 }
+
+/* Universal server selector */
+.server-panel {
+  margin-bottom: 1.25rem;
+}
+
+.server-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.4fr);
+  gap: 1rem;
+  align-items: end;
+}
+
+.server-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 0.75rem;
+  align-items: end;
+}
+
+.server-form-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.server-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 0.35rem 0.65rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--ink-muted);
+  background: var(--surface-2);
+}
+
+.server-status.live {
+  color: var(--ok);
+  border-color: rgba(52, 211, 153, 0.35);
+}
+
+.server-status.down {
+  color: var(--hit);
+  border-color: rgba(244, 63, 94, 0.35);
+}
+
+.server-status.checking {
+  color: var(--alert);
+  border-color: rgba(251, 191, 36, 0.35);
+}
+
+@media (max-width: 760px) {
+  .server-grid,
+  .server-form {
+    grid-template-columns: 1fr;
+  }
+
+  .server-form-actions {
+    justify-content: flex-start;
+  }
+}
