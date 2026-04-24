@@ -559,8 +559,8 @@ async function performMove(client, gameId, body = {}) {
     throw badRequest('Invalid player_id');
   }
 
-  let targetPlayerIdParam = null;
-  if (targetRef !== undefined) {
+  let requestedTargetPlayerId = null;
+  if (targetRef !== undefined && targetRef !== null && targetRef !== '' && targetRef !== 'all') {
     const targetResolution = await resolvePlayerReference(client, targetRef, {
       allowNumericString: false,
       allowUuid: true,
@@ -568,7 +568,7 @@ async function performMove(client, gameId, body = {}) {
     if (targetResolution.malformed || !targetResolution.player) {
       throw badRequest('Invalid target_player_id');
     }
-    targetPlayerIdParam = targetResolution.player.id;
+    requestedTargetPlayerId = targetResolution.player.id;
   }
 
   if (!Number.isInteger(row) || !Number.isInteger(col)) {
@@ -599,70 +599,101 @@ async function performMove(client, gameId, body = {}) {
     throw badRequest('Shot is out of bounds');
   }
 
-  const targetPlayerId = resolveTargetPlayer(players, resolvedPlayerId, targetPlayerIdParam);
-  if (!targetPlayerId) {
+  const aliveOpponents = players.filter((player) => player.player_id !== resolvedPlayerId && !player.eliminated_at);
+  if (aliveOpponents.length === 0) {
     throw badRequest('No valid target player remains');
   }
 
+  const targets = requestedTargetPlayerId
+    ? aliveOpponents.filter((player) => player.player_id === requestedTargetPlayerId)
+    : aliveOpponents;
+
+  if (targets.length === 0) {
+    throw badRequest('Invalid target_player_id');
+  }
+
+  const targetIds = targets.map((player) => player.player_id);
   const duplicateMove = await client.query(
-    `SELECT id
+    `SELECT target_player_id
      FROM moves
-     WHERE game_id = $1 AND target_player_id = $2 AND row = $3 AND col = $4`,
-    [gameId, targetPlayerId, row, col]
+     WHERE game_id = $1 AND target_player_id = ANY($2::uuid[]) AND row = $3 AND col = $4`,
+    [gameId, targetIds, row, col]
   );
   if (duplicateMove.rowCount > 0) {
     throw conflict('cell already targeted');
   }
 
-  const shipResult = await client.query(
-    `SELECT *
-     FROM ships
-     WHERE game_id = $1 AND player_id = $2 AND row = $3 AND col = $4 AND destroyed_at IS NULL
-     LIMIT 1`,
-    [gameId, targetPlayerId, row, col]
-  );
+  const idMap = await getPlayerIdMap(client);
+  const perTargetResults = [];
+  const eliminatedPlayerIds = [];
+  let hitCount = 0;
+  let firstMoveId = null;
 
-  let result = 'miss';
-  let hitPlayerId = null;
-  let eliminatedPlayerId = null;
-
-  if (shipResult.rowCount > 0) {
-    result = 'hit';
-    hitPlayerId = shipResult.rows[0].player_id;
-
-    await client.query('UPDATE ships SET destroyed_at = NOW() WHERE id = $1', [shipResult.rows[0].id]);
-
-    const remainingShips = await client.query(
-      `SELECT COUNT(*)::int AS remaining
+  for (const target of targets) {
+    const shipResult = await client.query(
+      `SELECT *
        FROM ships
-       WHERE game_id = $1 AND player_id = $2 AND destroyed_at IS NULL`,
-      [gameId, hitPlayerId]
+       WHERE game_id = $1 AND player_id = $2 AND row = $3 AND col = $4 AND destroyed_at IS NULL
+       LIMIT 1`,
+      [gameId, target.player_id, row, col]
     );
 
-    if (remainingShips.rows[0].remaining === 0) {
-      eliminatedPlayerId = hitPlayerId;
-      await client.query(
-        `UPDATE game_players
-         SET eliminated_at = NOW()
-         WHERE game_id = $1 AND player_id = $2 AND eliminated_at IS NULL`,
+    let result = 'miss';
+    let hitPlayerId = null;
+    let eliminatedPlayerId = null;
+
+    if (shipResult.rowCount > 0) {
+      result = 'hit';
+      hitCount += 1;
+      hitPlayerId = shipResult.rows[0].player_id;
+
+      await client.query('UPDATE ships SET destroyed_at = NOW() WHERE id = $1', [shipResult.rows[0].id]);
+
+      const remainingShips = await client.query(
+        `SELECT COUNT(*)::int AS remaining
+         FROM ships
+         WHERE game_id = $1 AND player_id = $2 AND destroyed_at IS NULL`,
         [gameId, hitPlayerId]
       );
-    }
-  }
 
-  const moveResult = await client.query(
-    `INSERT INTO moves (game_id, player_id, target_player_id, row, col, result, hit_player_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING *`,
-    [gameId, resolvedPlayerId, targetPlayerId, row, col, result, hitPlayerId]
-  );
+      if (remainingShips.rows[0].remaining === 0) {
+        eliminatedPlayerId = hitPlayerId;
+        eliminatedPlayerIds.push(hitPlayerId);
+        await client.query(
+          `UPDATE game_players
+           SET eliminated_at = NOW()
+           WHERE game_id = $1 AND player_id = $2 AND eliminated_at IS NULL`,
+          [gameId, hitPlayerId]
+        );
+      }
+    }
+
+    const moveResult = await client.query(
+      `INSERT INTO moves (game_id, player_id, target_player_id, row, col, result, hit_player_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING *`,
+      [gameId, resolvedPlayerId, target.player_id, row, col, result, hitPlayerId]
+    );
+
+    if (firstMoveId === null) {
+      firstMoveId = Number(moveResult.rows[0].id);
+    }
+
+    perTargetResults.push({
+      target_player_id: idMap.get(target.player_id) ?? null,
+      target_username: target.display_name,
+      result,
+      hit: Boolean(hitPlayerId),
+      eliminated: eliminatedPlayerId ? (idMap.get(eliminatedPlayerId) ?? null) : null,
+    });
+  }
 
   await client.query(
     `UPDATE players
      SET total_moves = total_moves + 1,
-         total_hits = total_hits + CASE WHEN $2 = 'hit' THEN 1 ELSE 0 END
+         total_hits = total_hits + $2
      WHERE id = $1`,
-    [resolvedPlayerId, result]
+    [resolvedPlayerId, hitCount]
   );
 
   const refreshed = await getGameWithPlayers(client, gameId);
@@ -695,16 +726,19 @@ async function performMove(client, gameId, body = {}) {
     );
   }
 
-  const idMap = await getPlayerIdMap(client);
   const nextPlayerId =
     nextTurn === null
       ? null
       : idMap.get(updatedPlayers.find((player) => player.turn_order === nextTurn && !player.eliminated_at)?.player_id) || null;
 
   return {
-    move_id: Number(moveResult.rows[0].id),
-    result,
-    eliminated: eliminatedPlayerId ? (idMap.get(eliminatedPlayerId) ?? null) : null,
+    move_id: firstMoveId,
+    result: hitCount > 0 ? 'hit' : 'miss',
+    hit_count: hitCount,
+    targets_checked: targets.length,
+    target_results: perTargetResults,
+    eliminated: eliminatedPlayerIds[0] ? (idMap.get(eliminatedPlayerIds[0]) ?? null) : null,
+    eliminated_players: eliminatedPlayerIds.map((playerId) => idMap.get(playerId) ?? null),
     winner_id: winnerId ? (idMap.get(winnerId) ?? null) : null,
     next_player_id: nextPlayerId,
     game_status: gameStatus,
@@ -954,12 +988,13 @@ app.post('/api/games', asyncHandler(async (req, res) => {
   if (!gridSize || gridSize < 5 || gridSize > 15) {
     throw badRequest('grid_size must be between 5 and 15');
   }
-  if (!maxPlayers || maxPlayers < 2 || maxPlayers > 50) {
-    throw badRequest('max_players must be at least 2');
+  if (!maxPlayers || maxPlayers < 2 || maxPlayers > 10) {
+    throw badRequest('max_players must be between 2 and 10');
   }
 
   const client = await pool.connect();
   try {
+    await client.query('BEGIN');
     const creatorResolution = await resolvePlayerReference(client, body.creator_id, {
       allowNumericString: false,
       allowUuid: true,
@@ -975,9 +1010,19 @@ app.post('/api/games', asyncHandler(async (req, res) => {
       [creatorResolution.player.id, gridSize, maxPlayers]
     );
 
+    await client.query(
+      `INSERT INTO game_players (game_id, player_id, turn_order, is_ai)
+       VALUES ($1, $2, 0, false)`,
+      [gameResult.rows[0].id, creatorResolution.player.id]
+    );
+
+    const { game, players } = await getGameWithPlayers(client, Number(gameResult.rows[0].id));
     const idMap = await getPlayerIdMap(client);
-    const game = serializeGame(gameResult.rows[0], [], idMap);
-    res.status(201).json(game);
+    await client.query('COMMIT');
+    res.status(201).json(serializeGame(game, players, idMap));
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
   } finally {
     client.release();
   }
@@ -1129,10 +1174,14 @@ app.post('/api/games/:id/moves', asyncHandler(async (req, res) => {
     res.json({
       result: outcome.result,
       eliminated: outcome.eliminated,
+      eliminated_players: outcome.eliminated_players,
       winner_id: outcome.winner_id,
       next_player_id: outcome.next_player_id,
       game_status: outcome.game_status,
       move_id: outcome.move_id,
+      hit_count: outcome.hit_count,
+      targets_checked: outcome.targets_checked,
+      target_results: outcome.target_results,
     });
   } catch (error) {
     await client.query('ROLLBACK');
