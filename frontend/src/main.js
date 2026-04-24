@@ -1,5 +1,10 @@
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+const DEFAULT_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || window.location.origin || '').replace(/\/$/, '');
+const SERVER_LIST_URL = (import.meta.env.VITE_SERVER_LIST_URL || '').trim();
 const STORAGE_KEY = 'battleship-phase2-state';
+
+const DEFAULT_SERVERS = [
+  { name: 'My Battleship Server', url: DEFAULT_API_BASE_URL },
+].filter((server) => server.url);
 
 const state = {
   username: '',
@@ -22,6 +27,11 @@ const state = {
   gamesPerPage: 5,
   currentView: 'auth',
   theme: 'dark',
+  apiBaseUrl: DEFAULT_API_BASE_URL,
+  serverUrlDraft: DEFAULT_API_BASE_URL,
+  serverStatus: 'unknown',
+  serverStatusMessage: 'Not checked yet',
+  serverList: DEFAULT_SERVERS,
 };
 
 loadLocalState();
@@ -187,6 +197,9 @@ function bootstrap() {
   attachGlobalEvents();
   render();
 
+  loadPublishedServers();
+  checkServerReachability(false);
+
   Promise.allSettled([
     refreshLobby(),
     refreshLeaderboard(),
@@ -345,6 +358,17 @@ function handleChange(event) {
     return;
   }
 
+  if (target.id === 'server-url') {
+    state.serverUrlDraft = target.value;
+    return;
+  }
+
+  if (target.id === 'server-select') {
+    state.serverUrlDraft = target.value;
+    render();
+    return;
+  }
+
   if (target.name === 'game_id') {
     state.joinGameIdDraft = target.value;
     persistLocalState();
@@ -357,6 +381,9 @@ async function handleSubmit(event) {
   const form = event.target;
 
   try {
+    if (form.id === 'server-form') {
+      await connectToServer(new FormData(form));
+    }
     if (form.id === 'player-form') {
       await createOrLoadPlayer(new FormData(form));
     }
@@ -437,6 +464,11 @@ async function handleClick(event) {
 
     if (action === 'refresh-all') {
       await refreshAll();
+      return;
+    }
+
+    if (action === 'check-server') {
+      await checkServerReachability(true);
       return;
     }
 
@@ -536,6 +568,19 @@ async function refreshAll() {
 }
 
 function clearState() {
+  clearPlayerSession();
+  localStorage.setItem(
+    STORAGE_KEY,
+    JSON.stringify({
+      apiBaseUrl: state.apiBaseUrl,
+      serverUrlDraft: state.serverUrlDraft,
+      theme: state.theme,
+      currentView: 'auth',
+    })
+  );
+}
+
+function clearPlayerSession() {
   state.username = '';
   state.playerId = null;
   state.activeGameId = null;
@@ -549,7 +594,6 @@ function clearState() {
   state.success = '';
   state.joinGameIdDraft = '';
   state.currentView = 'auth';
-  localStorage.removeItem(STORAGE_KEY);
 }
 
 function persistLocalState() {
@@ -564,6 +608,8 @@ function persistLocalState() {
       joinGameIdDraft: state.joinGameIdDraft,
       currentView: state.currentView,
       theme: state.theme,
+      apiBaseUrl: state.apiBaseUrl,
+      serverUrlDraft: state.serverUrlDraft,
     })
   );
 }
@@ -579,6 +625,9 @@ function loadLocalState() {
     }
 
     const parsed = JSON.parse(raw);
+
+    state.apiBaseUrl = sanitizeBaseUrl(parsed.apiBaseUrl || DEFAULT_API_BASE_URL);
+    state.serverUrlDraft = sanitizeBaseUrl(parsed.serverUrlDraft || state.apiBaseUrl);
 
     state.username = parsed.username || '';
     state.playerId = parsed.playerId || null;
@@ -631,12 +680,192 @@ function humanizeError(message) {
   return normalized;
 }
 
-async function api(path, options = {}) {
-  if (!API_BASE_URL) {
-    throw new Error('Missing VITE_API_BASE_URL in the frontend environment');
+function sanitizeBaseUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  return withProtocol.replace(/\/+$/, '');
+}
+
+function getApiBaseUrl() {
+  const apiBaseUrl = sanitizeBaseUrl(state.apiBaseUrl);
+  if (!apiBaseUrl) {
+    throw new Error('Choose a Battleship server before making API requests');
+  }
+  return apiBaseUrl;
+}
+
+function sameServer(a, b) {
+  return sanitizeBaseUrl(a).toLowerCase() === sanitizeBaseUrl(b).toLowerCase();
+}
+
+function serverDisplayName(url) {
+  const match = state.serverList.find((server) => sameServer(server.url, url));
+  return match?.name || url || 'Custom server';
+}
+
+async function loadPublishedServers() {
+  if (!SERVER_LIST_URL) {
+    return;
+  }
+
+  try {
+    const response = await fetch(SERVER_LIST_URL, { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`Server list returned ${response.status}`);
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    const payload = contentType.includes('application/json') ? await response.json() : await response.text();
+    const loadedServers = normalizeServerList(payload);
+    if (loadedServers.length) {
+      const merged = [...DEFAULT_SERVERS, ...loadedServers];
+      const seen = new Set();
+      state.serverList = merged.filter((server) => {
+        const key = sanitizeBaseUrl(server.url).toLowerCase();
+        if (!key || seen.has(key)) {
+          return false;
+        }
+        seen.add(key);
+        return true;
+      });
+      render();
+    }
+  } catch (error) {
+    state.serverStatusMessage = `Could not load published server list: ${error.message}`;
+    render();
+  }
+}
+
+function normalizeServerList(payload) {
+  if (Array.isArray(payload)) {
+    return payload.map((entry, index) => {
+      if (typeof entry === 'string') {
+        return { name: `Team Server ${index + 1}`, url: sanitizeBaseUrl(entry) };
+      }
+      return {
+        name: entry.name || entry.team || entry.label || `Team Server ${index + 1}`,
+        url: sanitizeBaseUrl(entry.url || entry.baseUrl || entry.base_url),
+      };
+    }).filter((server) => server.url);
+  }
+
+  return String(payload || '')
+    .split(/\r?\n/)
+    .map((line, index) => ({ name: `Team Server ${index + 1}`, url: sanitizeBaseUrl(line) }))
+    .filter((server) => server.url);
+}
+
+async function pingServer(baseUrl) {
+  const response = await fetch(`${baseUrl}/api/players`, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    cache: 'no-store',
+  });
+
+  const text = await response.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+
+  if (!response.ok) {
+    throw new Error(`Ping failed with status ${response.status}`);
+  }
+
+  if (data !== null && typeof data !== 'object') {
+    throw new Error('Server responded, but not with the expected JSON shape');
+  }
+
+  return data;
+}
+
+async function checkServerReachability(showMessage = false) {
+  const baseUrl = sanitizeBaseUrl(state.apiBaseUrl);
+  if (!baseUrl) {
+    state.serverStatus = 'offline';
+    state.serverStatusMessage = 'No server selected';
+    render();
+    return false;
+  }
+
+  state.serverStatus = 'checking';
+  state.serverStatusMessage = 'Checking server...';
+  render();
+
+  try {
+    await pingServer(baseUrl);
+    state.serverStatus = 'online';
+    state.serverStatusMessage = `${serverDisplayName(baseUrl)} is reachable`;
+    if (showMessage) {
+      showSuccess(`Connected to ${serverDisplayName(baseUrl)}`);
+    } else {
+      render();
+    }
+    return true;
+  } catch (error) {
+    state.serverStatus = 'offline';
+    state.serverStatusMessage = error.message.includes('Failed to fetch')
+      ? 'Unreachable. This may be a CORS issue or the server may be down.'
+      : error.message;
+    render();
+    return false;
+  }
+}
+
+async function connectToServer(formData) {
+  const selected = sanitizeBaseUrl(formData.get('server_select'));
+  const manual = sanitizeBaseUrl(formData.get('server_url'));
+  const nextBaseUrl = manual || selected;
+
+  if (!nextBaseUrl) {
+    throw new Error('Enter or select a server URL');
+  }
+
+  state.serverUrlDraft = nextBaseUrl;
+  state.serverStatus = 'checking';
+  state.serverStatusMessage = 'Checking server...';
+  render();
+
+  try {
+    await pingServer(nextBaseUrl);
+  } catch (error) {
+    state.serverStatus = 'offline';
+    state.serverStatusMessage = error.message.includes('Failed to fetch')
+      ? 'Unreachable. This may be a CORS issue or the server may be down.'
+      : error.message;
+    render();
+    throw new Error(`Could not connect to ${nextBaseUrl}. ${state.serverStatusMessage}`);
+  }
+
+  const switchingServers = !sameServer(state.apiBaseUrl, nextBaseUrl);
+  stopPolling();
+  state.apiBaseUrl = nextBaseUrl;
+  state.serverUrlDraft = nextBaseUrl;
+  state.serverStatus = 'online';
+  state.serverStatusMessage = `${serverDisplayName(nextBaseUrl)} is reachable`;
+  state.games = [];
+  state.leaderboard = [];
+
+  if (switchingServers) {
+    clearPlayerSession();
+  }
+
+  persistLocalState();
+  await refreshLobby();
+  await refreshLeaderboard();
+  showSuccess(`Connected to ${serverDisplayName(nextBaseUrl)}${switchingServers ? ". Create or load a player for this server." : ""}`);
+}
+
+async function api(path, options = {}) {
+  const apiBaseUrl = getApiBaseUrl();
+
+  const response = await fetch(`${apiBaseUrl}${path}`, {
     headers: {
       'Content-Type': 'application/json',
       ...(options.headers || {}),
@@ -1074,6 +1303,7 @@ function render() {
       ${renderBanner()}
 
       <main class="auth-shell">
+        ${renderServerPanel()}
         <section class="panel stack auth-panel">
           <h2>Player Sign In</h2>
           <form id="player-form" class="stack">
@@ -1095,7 +1325,7 @@ function render() {
       <div>
         <div class="eyebrow">Phase 2 client</div>
         <h1>Battleship Arena</h1>
-        <p>Lobby, multi-board battle view, live polling, move timeline, and leaderboard.</p>
+        <p>Connected to <strong>${escapeHtml(serverDisplayName(state.apiBaseUrl))}</strong> at <span class="mono wrap">${escapeHtml(state.apiBaseUrl || 'No server selected')}</span>.</p>
       </div>
       <div class="actions">
         <button type="button" class="${state.currentView === 'game' ? '' : 'ghost'}" data-action="go-game-view">Game</button>
@@ -1117,10 +1347,61 @@ function render() {
   restoreRenderState(snapshot);
 }
 
+function renderServerPanel() {
+  const statusClass = state.serverStatus === 'online'
+    ? 'online'
+    : state.serverStatus === 'checking'
+      ? 'checking'
+      : state.serverStatus === 'offline'
+        ? 'offline'
+        : '';
+  const statusLabel = state.serverStatus === 'online'
+    ? '✅ live'
+    : state.serverStatus === 'checking'
+      ? 'Checking...'
+      : state.serverStatus === 'offline'
+        ? '❌ unreachable'
+        : 'Not checked';
+  const selectedUrl = state.serverUrlDraft || state.apiBaseUrl || '';
+
+  return `
+    <section class="panel stack server-panel">
+      <div class="section-head">
+        <h2>Server</h2>
+        <span class="badge server-status ${statusClass}">${statusLabel}</span>
+      </div>
+      <form id="server-form" class="stack">
+        <label>
+          Published / Saved Servers
+          <select id="server-select" name="server_select">
+            ${state.serverList.map((server) => `
+              <option value="${escapeHtml(server.url)}" ${sameServer(server.url, selectedUrl) ? 'selected' : ''}>
+                ${escapeHtml(server.name)} — ${escapeHtml(server.url)}
+              </option>
+            `).join('')}
+            ${state.serverList.some((server) => sameServer(server.url, selectedUrl)) || !selectedUrl ? '' : `<option value="${escapeHtml(selectedUrl)}" selected>Custom — ${escapeHtml(selectedUrl)}</option>`}
+          </select>
+        </label>
+        <label>
+          Manual Server URL
+          <input id="server-url" name="server_url" value="${escapeHtml(state.serverUrlDraft || '')}" placeholder="https://team07.cpsc3750.com" />
+        </label>
+        <div class="actions">
+          <button type="submit">Connect</button>
+          <button type="button" class="secondary" data-action="check-server">Ping Current</button>
+        </div>
+      </form>
+      <div class="small wrap">Current base URL: <span class="mono">${escapeHtml(state.apiBaseUrl || '—')}</span></div>
+      <div class="small wrap">${escapeHtml(state.serverStatusMessage || '')}</div>
+    </section>
+  `;
+}
+
 function renderGamePage() {
   return `
     <div class="layout">
       <aside class="stack lobby-col">
+        ${renderServerPanel()}
         <section class="panel stack">
           <h2>Create Game</h2>
           <form id="create-game-form" class="stack">
@@ -1205,6 +1486,7 @@ function renderStatsPage() {
   return `
     <div class="layout">
       <aside class="stack identity-col">
+        ${renderServerPanel()}
         <section class="panel stack">
           <h2>Player</h2>
           <div class="info-grid">
