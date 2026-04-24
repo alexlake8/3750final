@@ -1,4 +1,5 @@
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+const DEFAULT_API_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL || window.location.origin);
+const SERVER_LIST_URL = (import.meta.env.VITE_SERVER_LIST_URL || '').trim();
 const STORAGE_KEY = 'battleship-phase2-state';
 
 const state = {
@@ -22,11 +23,55 @@ const state = {
   gamesPerPage: 5,
   currentView: 'auth',
   theme: 'dark',
+  apiBaseUrl: DEFAULT_API_BASE_URL,
+  manualServerUrl: '',
+  serverOptions: defaultServerOptions(),
+  serverStatus: 'unknown',
+  serverStatusMessage: 'Not checked yet',
+  serverListLoaded: false,
 };
 
 loadLocalState();
 bootstrap();
 
+
+function normalizeBaseUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
+  }
+
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  return withProtocol.replace(/\/+$/, '');
+}
+
+function defaultServerOptions() {
+  return DEFAULT_API_BASE_URL
+    ? [{ name: 'Default server', url: DEFAULT_API_BASE_URL }]
+    : [];
+}
+
+function addServerOption(name, url) {
+  const normalizedUrl = normalizeBaseUrl(url);
+  if (!normalizedUrl) {
+    return;
+  }
+  const existing = state.serverOptions.find((server) => server.url === normalizedUrl);
+  if (existing) {
+    if (name && existing.name === existing.url) {
+      existing.name = name;
+    }
+    return;
+  }
+  state.serverOptions.push({ name: name || normalizedUrl, url: normalizedUrl });
+}
+
+function serverLabel(server) {
+  if (!server) {
+    return '';
+  }
+  return server.name && server.name !== server.url ? `${server.name} — ${server.url}` : server.url;
+}
 
 function createDefaultFleet() {
   return [
@@ -188,6 +233,8 @@ function bootstrap() {
   render();
 
   Promise.allSettled([
+    loadServerList(),
+    checkServerReachability(false),
     refreshLobby(),
     refreshLeaderboard(),
     state.playerId ? refreshStats() : Promise.resolve(),
@@ -348,6 +395,17 @@ function handleChange(event) {
   if (target.name === 'game_id') {
     state.joinGameIdDraft = target.value;
     persistLocalState();
+    return;
+  }
+
+  if (target.id === 'server-select') {
+    changeServer(target.value);
+    return;
+  }
+
+  if (target.id === 'manual-server-url') {
+    state.manualServerUrl = target.value;
+    persistLocalState();
   }
 }
 
@@ -365,6 +423,9 @@ async function handleSubmit(event) {
     }
     if (form.id === 'join-by-id-form') {
       await joinGameByForm(new FormData(form));
+    }
+    if (form.id === 'server-form') {
+      await connectManualServer(new FormData(form));
     }
   } catch (error) {
     showError(error.message);
@@ -437,6 +498,11 @@ async function handleClick(event) {
 
     if (action === 'refresh-all') {
       await refreshAll();
+      return;
+    }
+
+    if (action === 'check-server') {
+      await checkServerReachability(true);
       return;
     }
 
@@ -535,6 +601,9 @@ async function refreshAll() {
 }
 
 function clearState() {
+  const apiBaseUrl = state.apiBaseUrl;
+  const manualServerUrl = state.manualServerUrl;
+  const theme = state.theme;
   state.username = '';
   state.playerId = null;
   state.activeGameId = null;
@@ -548,7 +617,10 @@ function clearState() {
   state.success = '';
   state.joinGameIdDraft = '';
   state.currentView = 'auth';
-  localStorage.removeItem(STORAGE_KEY);
+  state.apiBaseUrl = apiBaseUrl;
+  state.manualServerUrl = manualServerUrl;
+  state.theme = theme;
+  persistLocalState();
 }
 
 function persistLocalState() {
@@ -563,6 +635,8 @@ function persistLocalState() {
       joinGameIdDraft: state.joinGameIdDraft,
       currentView: state.currentView,
       theme: state.theme,
+      apiBaseUrl: state.apiBaseUrl,
+      manualServerUrl: state.manualServerUrl,
     })
   );
 }
@@ -588,6 +662,9 @@ function loadLocalState() {
     state.currentView = parsed.currentView || (state.playerId ? 'game' : 'auth');
 
     state.theme = parsed.theme || 'dark';
+    state.apiBaseUrl = normalizeBaseUrl(parsed.apiBaseUrl || DEFAULT_API_BASE_URL);
+    state.manualServerUrl = parsed.manualServerUrl || '';
+    addServerOption('Saved server', state.apiBaseUrl);
     document.documentElement.dataset.theme = state.theme;
   } catch {
     localStorage.removeItem(STORAGE_KEY);
@@ -630,12 +707,160 @@ function humanizeError(message) {
   return normalized;
 }
 
-async function api(path, options = {}) {
-  if (!API_BASE_URL) {
-    throw new Error('Missing VITE_API_BASE_URL in the frontend environment');
+
+async function fetchJsonOrText(url) {
+  const response = await fetch(url, { cache: 'no-store' });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`Server list failed with status ${response.status}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+async function loadServerList() {
+  if (!SERVER_LIST_URL) {
+    state.serverListLoaded = true;
+    render();
+    return;
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  try {
+    const payload = await fetchJsonOrText(SERVER_LIST_URL);
+    const entries = Array.isArray(payload)
+      ? payload
+      : typeof payload === 'string'
+        ? payload.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+        : Array.isArray(payload?.servers)
+          ? payload.servers
+          : [];
+
+    entries.forEach((entry, index) => {
+      if (typeof entry === 'string') {
+        addServerOption(`Team Server ${index + 1}`, entry);
+      } else {
+        addServerOption(entry.name || entry.team || `Team Server ${index + 1}`, entry.url || entry.baseUrl || entry.base_url);
+      }
+    });
+  } catch (error) {
+    state.serverStatusMessage = `Could not load published server list: ${error.message}`;
+  } finally {
+    state.serverListLoaded = true;
+    render();
+  }
+}
+
+async function pingServer(baseUrl) {
+  const normalizedUrl = normalizeBaseUrl(baseUrl);
+  if (!normalizedUrl) {
+    throw new Error('Enter a server URL first');
+  }
+
+  const response = await fetch(`${normalizedUrl}/api/players`, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+    cache: 'no-store',
+  });
+
+  const text = await response.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    data = null;
+  }
+
+  if (!response.ok) {
+    throw new Error(`Reached server, but /api/players returned ${response.status}`);
+  }
+
+  if (data !== null && !Array.isArray(data) && !Array.isArray(data?.players)) {
+    throw new Error('Reached server, but /api/players returned an unexpected shape');
+  }
+
+  return normalizedUrl;
+}
+
+function resetSessionForServerChange() {
+  stopPolling();
+  state.playerId = null;
+  state.activeGameId = null;
+  state.currentGame = null;
+  state.myStats = null;
+  state.myShips = [];
+  state.pendingFleet = createDefaultFleet();
+  syncPendingShipsFromFleet();
+  state.moveHistory = [];
+  state.games = [];
+  state.leaderboard = [];
+  state.joinGameIdDraft = '';
+  state.currentPage = 1;
+  state.currentView = 'auth';
+}
+
+async function changeServer(nextUrl) {
+  const normalizedUrl = normalizeBaseUrl(nextUrl);
+  if (!normalizedUrl || normalizedUrl === state.apiBaseUrl) {
+    return;
+  }
+
+  state.apiBaseUrl = normalizedUrl;
+  state.manualServerUrl = normalizedUrl;
+  state.serverStatus = 'checking';
+  state.serverStatusMessage = 'Checking server...';
+  resetSessionForServerChange();
+  addServerOption('Manual server', normalizedUrl);
+  persistLocalState();
+  render();
+  await checkServerReachability(true);
+}
+
+async function connectManualServer(formData) {
+  const nextUrl = normalizeBaseUrl(formData.get('server_url'));
+  if (!nextUrl) {
+    throw new Error('Enter a server URL first');
+  }
+  await changeServer(nextUrl);
+}
+
+async function checkServerReachability(showSuccessMessage = false) {
+  state.serverStatus = 'checking';
+  state.serverStatusMessage = 'Checking server...';
+  render();
+
+  try {
+    const reachableUrl = await pingServer(state.apiBaseUrl);
+    state.apiBaseUrl = reachableUrl;
+    state.serverStatus = 'live';
+    state.serverStatusMessage = 'Live';
+    addServerOption('Current server', reachableUrl);
+    persistLocalState();
+    if (showSuccessMessage) {
+      state.success = `Connected to ${reachableUrl}`;
+      state.error = '';
+    }
+  } catch (error) {
+    state.serverStatus = 'down';
+    state.serverStatusMessage = error.message || 'Unreachable';
+    if (showSuccessMessage) {
+      state.error = state.serverStatusMessage;
+      state.success = '';
+    }
+  }
+
+  render();
+}
+
+async function api(path, options = {}) {
+  const baseUrl = normalizeBaseUrl(state.apiBaseUrl || DEFAULT_API_BASE_URL);
+  if (!baseUrl) {
+    throw new Error('Choose a Battleship server first');
+  }
+
+  const response = await fetch(`${baseUrl}${path}`, {
     headers: {
       'Content-Type': 'application/json',
       ...(options.headers || {}),
@@ -1104,6 +1329,7 @@ function render() {
       </section>
 
       ${renderBanner()}
+      ${renderServerPanel()}
 
       <main class="auth-shell">
         <section class="panel stack auth-panel">
@@ -1142,6 +1368,7 @@ function render() {
     </section>
 
     ${renderBanner()}
+    ${renderServerPanel()}
 
     ${state.currentView === 'stats' ? renderStatsPage() : renderGamePage()}
   `;
@@ -1262,6 +1489,51 @@ function renderStatsPage() {
         </section>
       </main>
     </div>
+  `;
+}
+
+
+function renderServerPanel() {
+  const currentUrl = normalizeBaseUrl(state.apiBaseUrl || DEFAULT_API_BASE_URL);
+  const statusClass = state.serverStatus === 'live' ? 'live' : state.serverStatus === 'down' ? 'down' : state.serverStatus === 'checking' ? 'checking' : '';
+  const statusIcon = state.serverStatus === 'live' ? '✅' : state.serverStatus === 'down' ? '❌' : state.serverStatus === 'checking' ? '⏳' : '•';
+  const options = [...state.serverOptions];
+  if (currentUrl && !options.some((server) => server.url === currentUrl)) {
+    options.unshift({ name: 'Current server', url: currentUrl });
+  }
+
+  return `
+    <section class="panel server-panel stack">
+      <div class="section-head">
+        <div>
+          <h2>Server Connection</h2>
+          <div class="small">Use your client with your server or any other compliant class server.</div>
+        </div>
+        <span class="server-status ${statusClass}">${statusIcon} ${escapeHtml(state.serverStatusMessage)}</span>
+      </div>
+
+      <div class="server-grid">
+        <label>
+          Published / Saved Servers
+          <select id="server-select">
+            ${options.map((server) => `<option value="${escapeHtml(server.url)}" ${server.url === currentUrl ? 'selected' : ''}>${escapeHtml(serverLabel(server))}</option>`).join('')}
+          </select>
+        </label>
+
+        <form id="server-form" class="server-form">
+          <label>
+            Manual Server URL
+            <input id="manual-server-url" name="server_url" value="${escapeHtml(state.manualServerUrl || currentUrl)}" placeholder="https://team07.cpsc3750.com" />
+          </label>
+          <div class="server-form-actions">
+            <button type="submit" class="secondary">Connect</button>
+            <button type="button" class="ghost" data-action="check-server">Check</button>
+          </div>
+        </form>
+      </div>
+
+      <div class="small wrap">Current API base URL: <strong>${escapeHtml(currentUrl || 'Not set')}</strong></div>
+    </section>
   `;
 }
 
