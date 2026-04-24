@@ -937,3 +937,28 @@ button.small-button {
   .cell, .axis-cell { width: 28px; height: 28px; font-size: 0.7rem; }
   .row, .info-grid, .summary-grid { grid-template-columns: 1fr 1fr; }
 }
+
+/* ============================================================
+   SERVER SWITCHER
+   ============================================================ */
+.server-panel select {
+  font-size: 0.82rem;
+}
+
+.server-status.online {
+  color: var(--bg-void);
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.server-status.offline {
+  color: var(--ink-bright);
+  background: var(--hit-soft);
+  border-color: var(--hit);
+}
+
+.server-status.checking {
+  color: var(--bg-void);
+  background: var(--alert);
+  border-color: var(--alert);
+}
