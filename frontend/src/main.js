@@ -1,1930 +1,964 @@
-const DEFAULT_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || window.location.origin || '').replace(/\/$/, '');
-const SERVER_LIST_URL = (import.meta.env.VITE_SERVER_LIST_URL || '').trim();
-const STORAGE_KEY = 'battleship-phase2-state';
-
-const DEFAULT_SERVERS = [
-  { name: 'My Battleship Server', url: DEFAULT_API_BASE_URL },
-].filter((server) => server.url);
-
-const state = {
-  username: '',
-  playerId: null,
-  activeGameId: null,
-  currentGame: null,
-  myStats: null,
-  myShips: [],
-  pendingShips: [],
-  pendingFleet: createDefaultFleet(),
-  moveHistory: [],
-  games: [],
-  leaderboard: [],
-  error: '',
-  success: '',
-  pollHandle: null,
-  busy: false,
-  joinGameIdDraft: '',
-  currentPage: 1,
-  gamesPerPage: 5,
-  currentView: 'auth',
-  theme: 'dark',
-  apiBaseUrl: DEFAULT_API_BASE_URL,
-  serverUrlDraft: DEFAULT_API_BASE_URL,
-  serverStatus: 'unknown',
-  serverStatusMessage: 'Not checked yet',
-  serverList: DEFAULT_SERVERS,
-};
-
-loadLocalState();
-bootstrap();
-
-
-function createDefaultFleet() {
-  return [
-    { id: 'carrier', name: 'Carrier', length: 5, orientation: 'horizontal', row: null, col: null },
-    { id: 'battleship', name: 'Battleship', length: 4, orientation: 'horizontal', row: null, col: null },
-    { id: 'cruiser', name: 'Cruiser', length: 3, orientation: 'horizontal', row: null, col: null },
-  ];
-}
-
-function normalizePendingFleet(rawFleet) {
-  const defaults = createDefaultFleet();
-  if (!Array.isArray(rawFleet)) {
-    return defaults;
-  }
-
-  return defaults.map((baseShip) => {
-    const found = rawFleet.find((ship) => ship?.id === baseShip.id) || {};
-    const orientation = found.orientation === 'vertical' ? 'vertical' : 'horizontal';
-    const row = Number.isInteger(found.row) ? found.row : null;
-    const col = Number.isInteger(found.col) ? found.col : null;
-    return {
-      ...baseShip,
-      orientation,
-      row,
-      col,
-    };
-  });
-}
-
-function isPendingShipPlaced(ship) {
-  return Number.isInteger(ship?.row) && Number.isInteger(ship?.col);
-}
-
-function getShipCells(ship, orientation = ship?.orientation, row = ship?.row, col = ship?.col) {
-  if (!ship || !Number.isInteger(row) || !Number.isInteger(col)) {
-    return [];
-  }
-
-  return Array.from({ length: ship.length }, (_, index) => ({
-    row: row + (orientation === 'vertical' ? index : 0),
-    col: col + (orientation === 'horizontal' ? index : 0),
-    shipId: ship.id,
-  }));
-}
-
-function getPendingShipCells(excludeShipId = null) {
-  return state.pendingFleet.flatMap((ship) => (ship.id === excludeShipId ? [] : getShipCells(ship)));
-}
-
-function syncPendingShipsFromFleet() {
-  state.pendingShips = getPendingShipCells().map(({ row, col }) => ({ row, col }));
-}
-
-function fleetPlacementSummary() {
-  const placed = state.pendingFleet.filter(isPendingShipPlaced).length;
-  return `${placed}/${state.pendingFleet.length} ships placed`;
-}
-
-function getPendingShipById(shipId) {
-  return state.pendingFleet.find((ship) => ship.id === shipId) || null;
-}
-
-function assertPlacementPhase() {
-  ensurePlayerReady();
-  ensureCurrentGame();
-
-  if (!getCurrentPlayer()) {
-    throw new Error('Join this game before placing ships');
-  }
-
-  if (myPlacementSubmitted()) {
-    throw new Error('Your ships are already placed for this game');
-  }
-
-  if (state.currentGame?.status !== 'waiting') {
-    throw new Error('Ship placement is only available before the game starts');
-  }
-}
-
-function validatePendingShipPlacement(ship, row, col, orientation = ship.orientation) {
-  const gridSize = state.currentGame?.grid_size || 8;
-  const cells = getShipCells(ship, orientation, row, col);
-  if (!cells.length) {
-    throw new Error('Unable to place that ship');
-  }
-
-  if (cells.some((cell) => cell.row < 0 || cell.row >= gridSize || cell.col < 0 || cell.col >= gridSize)) {
-    throw new Error(`${ship.name} does not fit there`);
-  }
-
-  const occupied = new Set(getPendingShipCells(ship.id).map((cell) => `${cell.row},${cell.col}`));
-  if (cells.some((cell) => occupied.has(`${cell.row},${cell.col}`))) {
-    throw new Error(`${ship.name} overlaps another ship`);
-  }
-}
-
-function placePendingShip(shipId, row, col) {
-  assertPlacementPhase();
-  const ship = getPendingShipById(shipId);
-  if (!ship) {
-    throw new Error('That ship is no longer available');
-  }
-
-  validatePendingShipPlacement(ship, row, col, ship.orientation);
-
-  state.pendingFleet = state.pendingFleet.map((entry) => (
-    entry.id === shipId
-      ? { ...entry, row, col }
-      : entry
-  ));
-  syncPendingShipsFromFleet();
-  persistLocalState();
-  render();
-}
-
-function rotatePendingShip(shipId) {
-  assertPlacementPhase();
-  const ship = getPendingShipById(shipId);
-  if (!ship) {
-    throw new Error('That ship is no longer available');
-  }
-
-  const nextOrientation = ship.orientation === 'horizontal' ? 'vertical' : 'horizontal';
-  if (isPendingShipPlaced(ship)) {
-    validatePendingShipPlacement(ship, ship.row, ship.col, nextOrientation);
-  }
-
-  state.pendingFleet = state.pendingFleet.map((entry) => (
-    entry.id === shipId
-      ? { ...entry, orientation: nextOrientation }
-      : entry
-  ));
-  syncPendingShipsFromFleet();
-  persistLocalState();
-  render();
-}
-
-function resetPendingShip(shipId) {
-  assertPlacementPhase();
-  state.pendingFleet = state.pendingFleet.map((entry) => (
-    entry.id === shipId
-      ? { ...entry, row: null, col: null }
-      : entry
-  ));
-  syncPendingShipsFromFleet();
-  persistLocalState();
-  render();
-}
-
-function clearPendingFleet() {
-  assertPlacementPhase();
-  state.pendingFleet = createDefaultFleet();
-  syncPendingShipsFromFleet();
-  persistLocalState();
-  render();
-}
-function bootstrap() {
-  attachGlobalEvents();
-  render();
-
-  loadPublishedServers();
-  checkServerReachability(false);
-
-  Promise.allSettled([
-    refreshLobby(),
-    refreshLeaderboard(),
-    state.playerId ? refreshStats() : Promise.resolve(),
-    state.activeGameId ? refreshCurrentGame(true) : Promise.resolve(),
-  ]).finally(() => {
-    if (state.activeGameId) {
-      startPolling();
-    }
-  });
-}
-
-function attachGlobalEvents() {
-  document.addEventListener('submit', handleSubmit);
-  document.addEventListener('click', handleClick);
-  document.addEventListener('change', handleChange);
-  document.addEventListener('input', handleChange);
-  document.addEventListener('dragstart', handleDragStart);
-  document.addEventListener('dragover', handleDragOver);
-  document.addEventListener('drop', handleDrop);
-}
-
-
-function handleDragStart(event) {
-  const ship = event.target.closest('[data-draggable-ship-id]');
-  if (!ship || !event.dataTransfer) {
-    return;
-  }
-
-  event.dataTransfer.setData('text/plain', ship.dataset.draggableShipId);
-  event.dataTransfer.effectAllowed = 'move';
-}
-
-function handleDragOver(event) {
-  const dropCell = event.target.closest('[data-drop-ship-cell="true"]');
-  if (!dropCell) {
-    return;
-  }
-
-  event.preventDefault();
-  if (event.dataTransfer) {
-    event.dataTransfer.dropEffect = 'move';
-  }
-}
-
-function handleDrop(event) {
-  const dropCell = event.target.closest('[data-drop-ship-cell="true"]');
-  if (!dropCell) {
-    return;
-  }
-
-  event.preventDefault();
-  const shipId = event.dataTransfer?.getData('text/plain');
-  if (!shipId) {
-    return;
-  }
-
-  clearMessages();
-  try {
-    placePendingShip(shipId, Number(dropCell.dataset.row), Number(dropCell.dataset.col));
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-function captureRenderState() {
-  const active = document.activeElement;
-  if (!active || !('tagName' in active)) {
-    return null;
-  }
-
-  const tagName = String(active.tagName || '').toLowerCase();
-  if (!['input', 'textarea', 'select'].includes(tagName)) {
-    return null;
-  }
-
-  const selector = active.id
-    ? `#${active.id}`
-    : active.name
-      ? `${active.tagName.toLowerCase()}[name="${active.name}"]`
-      : null;
-
-  if (!selector) {
-    return null;
-  }
-
-  return {
-    selector,
-    value: 'value' in active ? active.value : null,
-    selectionStart: typeof active.selectionStart === 'number' ? active.selectionStart : null,
-    selectionEnd: typeof active.selectionEnd === 'number' ? active.selectionEnd : null,
-  };
-}
-
-function restoreRenderState(snapshot) {
-  if (!snapshot?.selector) {
-    return;
-  }
-
-  const nextActive = document.querySelector(snapshot.selector);
-  if (!nextActive) {
-    return;
-  }
-
-  if ('value' in nextActive && snapshot.value !== null) {
-    nextActive.value = snapshot.value;
-  }
-
-  nextActive.focus();
-
-  if (
-    typeof nextActive.setSelectionRange === 'function' &&
-    typeof snapshot.selectionStart === 'number' &&
-    typeof snapshot.selectionEnd === 'number'
-  ) {
-    nextActive.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd);
-  }
-}
-
-function normalizeStatus(status) {
-  if (status === 'waiting_setup' || status === 'waiting') {
-    return 'waiting';
-  }
-  if (status === 'playing' || status === 'active') {
-    return 'active';
-  }
-  return status || 'waiting';
-}
-
-async function copyText(text) {
-  if (!text) {
-    throw new Error('Nothing to copy yet');
-  }
-
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(String(text));
-    return;
-  }
-
-  const helper = document.createElement('textarea');
-  helper.value = String(text);
-  helper.setAttribute('readonly', 'readonly');
-  helper.style.position = 'fixed';
-  helper.style.opacity = '0';
-  document.body.appendChild(helper);
-  helper.select();
-  document.execCommand('copy');
-  document.body.removeChild(helper);
-}
-
-function handleChange(event) {
-  const target = event.target;
-  if (target.id === 'username') {
-    state.username = target.value;
-    persistLocalState();
-    return;
-  }
-
-  if (target.id === 'server-url') {
-    state.serverUrlDraft = target.value;
-    return;
-  }
-
-  if (target.id === 'server-select') {
-    state.serverUrlDraft = target.value;
-    render();
-    return;
-  }
-
-  if (target.name === 'game_id') {
-    state.joinGameIdDraft = target.value;
-    persistLocalState();
-  }
-}
-
-async function handleSubmit(event) {
-  event.preventDefault();
-  clearMessages();
-  const form = event.target;
-
-  try {
-    if (form.id === 'server-form') {
-      await connectToServer(new FormData(form));
-    }
-    if (form.id === 'player-form') {
-      await createOrLoadPlayer(new FormData(form));
-    }
-    if (form.id === 'create-game-form') {
-      await createGame(new FormData(form));
-    }
-    if (form.id === 'join-by-id-form') {
-      await joinGameByForm(new FormData(form));
-    }
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-async function handleClick(event) {
-  const target = event.target.closest('[data-action]');
-  if (!target) {
-    return;
-  }
-
-  event.preventDefault();
-  clearMessages();
-
-  try {
-    const action = target.dataset.action;
-
-    // ✅ THEME TOGGLE
-    if (action === 'toggle-theme') {
-      state.theme = state.theme === 'dark' ? 'light' : 'dark';
-      document.documentElement.dataset.theme = state.theme;
-      persistLocalState();
-      render();
-      return;
-    }
-
-    // ✅ PAGE NAVIGATION
-    if (action === 'go-game-view') {
-      state.currentView = 'game';
-      persistLocalState();
-      render();
-      return;
-    }
-
-    if (action === 'go-stats-view') {
-      state.currentView = 'stats';
-      persistLocalState();
-      render();
-      return;
-    }
-
-    // ✅ PAGINATION
-    if (action === 'prev-page') {
-      if (state.currentPage > 1) {
-        state.currentPage -= 1;
-        render();
-      }
-      return;
-    }
-
-    if (action === 'next-page') {
-      const totalPages = Math.max(1, Math.ceil(state.games.length / (state.gamesPerPage || 5)));
-      if (state.currentPage < totalPages) {
-        state.currentPage += 1;
-        render();
-      }
-      return;
-    }
-
-    // ✅ SESSION
-    if (action === 'clear-session') {
-      stopPolling();
-      clearState();
-      render();
-      await refreshLobby();
-      await refreshLeaderboard();
-      return;
-    }
-
-    if (action === 'refresh-all') {
-      await refreshAll();
-      return;
-    }
-
-    if (action === 'check-server') {
-      await checkServerReachability(true);
-      return;
-    }
-
-    // ✅ GAME ACTIONS
-    if (action === 'join-game') {
-      await joinGame(Number(target.dataset.gameId));
-      return;
-    }
-
-    if (action === 'copy-game-id') {
-      await copyText(target.dataset.gameId || state.activeGameId);
-      showSuccess(`Game ID ${target.dataset.gameId || state.activeGameId} copied`);
-      return;
-    }
-
-    if (action === 'open-game') {
-      const nextGameId = Number(target.dataset.gameId);
-      if (state.activeGameId !== nextGameId) {
-        state.myShips = [];
-        state.pendingFleet = createDefaultFleet();
-        syncPendingShipsFromFleet();
-        state.moveHistory = [];
-      }
-      state.activeGameId = nextGameId;
-      persistLocalState();
-      await refreshCurrentGame(true);
-      startPolling();
-      showSuccess(`Opened game ${state.activeGameId}`);
-      return;
-    }
-
-    if (action === 'leave-current-game') {
-      stopPolling();
-      state.activeGameId = null;
-      state.currentGame = null;
-      state.myShips = [];
-      state.pendingFleet = createDefaultFleet();
-      syncPendingShipsFromFleet();
-      state.moveHistory = [];
-      persistLocalState();
-      render();
-      return;
-    }
-
-    // ✅ SHIPS
-    if (action === 'rotate-pending-ship') {
-      rotatePendingShip(target.dataset.shipId);
-      return;
-    }
-
-    if (action === 'reset-pending-ship') {
-      resetPendingShip(target.dataset.shipId);
-      return;
-    }
-
-    if (action === 'clear-pending-ships') {
-      clearPendingFleet();
-      return;
-    }
-
-    if (action === 'submit-ships') {
-      await submitShips();
-      return;
-    }
-
-    if (action === 'start-game') {
-      await startCurrentGame();
-      return;
-    }
-
-    // ✅ FIRE
-    if (action === 'fire-shot') {
-      await fireShot(
-        Number(target.dataset.row),
-        Number(target.dataset.col),
-        Number(target.dataset.targetPlayerId)
-      );
-      return;
-    }
-
-  } catch (error) {
-    showError(error.message);
-  }
-}
-
-async function refreshAll() {
-  await refreshLobby();
-  await refreshLeaderboard();
-  if (state.playerId) {
-    await refreshStats();
-  }
-  if (state.activeGameId) {
-    await refreshCurrentGame(true);
-  } else {
-    render();
-  }
-}
-
-function clearState() {
-  clearPlayerSession();
-  localStorage.setItem(
-    STORAGE_KEY,
-    JSON.stringify({
-      apiBaseUrl: state.apiBaseUrl,
-      serverUrlDraft: state.serverUrlDraft,
-      theme: state.theme,
-      currentView: 'auth',
-    })
-  );
-}
-
-function clearPlayerSession() {
-  state.username = '';
-  state.playerId = null;
-  state.activeGameId = null;
-  state.currentGame = null;
-  state.myStats = null;
-  state.myShips = [];
-  state.pendingFleet = createDefaultFleet();
-  syncPendingShipsFromFleet();
-  state.moveHistory = [];
-  state.error = '';
-  state.success = '';
-  state.joinGameIdDraft = '';
-  state.currentView = 'auth';
-}
-
-function persistLocalState() {
-  localStorage.setItem(
-    STORAGE_KEY,
-    JSON.stringify({
-      username: state.username,
-      playerId: state.playerId,
-      activeGameId: state.activeGameId,
-      pendingShips: state.pendingShips,
-      pendingFleet: state.pendingFleet,
-      joinGameIdDraft: state.joinGameIdDraft,
-      currentView: state.currentView,
-      theme: state.theme,
-      apiBaseUrl: state.apiBaseUrl,
-      serverUrlDraft: state.serverUrlDraft,
-    })
-  );
-}
-
-function loadLocalState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-
-    if (!raw) {
-      state.theme = 'dark';
-      document.documentElement.dataset.theme = state.theme;
-      return;
-    }
-
-    const parsed = JSON.parse(raw);
-
-    state.apiBaseUrl = sanitizeBaseUrl(parsed.apiBaseUrl || DEFAULT_API_BASE_URL);
-    state.serverUrlDraft = sanitizeBaseUrl(parsed.serverUrlDraft || state.apiBaseUrl);
-
-    state.username = parsed.username || '';
-    state.playerId = parsed.playerId || null;
-    state.activeGameId = parsed.activeGameId || null;
-    state.pendingFleet = normalizePendingFleet(parsed.pendingFleet);
-    syncPendingShipsFromFleet();
-    state.joinGameIdDraft = parsed.joinGameIdDraft || '';
-    state.currentView = parsed.currentView || (state.playerId ? 'game' : 'auth');
-
-    state.theme = parsed.theme || 'dark';
-    document.documentElement.dataset.theme = state.theme;
-  } catch {
-    localStorage.removeItem(STORAGE_KEY);
-  }
-}
-
-function clearMessages() {
-  state.error = '';
-  state.success = '';
-}
-
-function showError(message) {
-  state.error = humanizeError(message);
-  state.success = '';
-  render();
-}
-
-function showSuccess(message) {
-  state.success = message;
-  state.error = '';
-  render();
-}
-
-function humanizeError(message) {
-  const normalized = String(message || 'Something went wrong').trim();
-
-  if (/not this player's turn|not your turn/i.test(normalized)) {
-    return 'It is not your turn yet.';
-  }
-  if (/already been fired upon|already fired|cell already targeted/i.test(normalized)) {
-    return 'That square was already targeted.';
-  }
-  if (/game is not active/i.test(normalized)) {
-    return 'The game has not started yet.';
-  }
-  if (/all players must place ships/i.test(normalized)) {
-    return 'Everyone has to place ships before the game can start.';
-  }
-
-  return normalized;
-}
-
-function sanitizeBaseUrl(value) {
-  const raw = String(value || '').trim();
-  if (!raw) {
-    return '';
-  }
-
-  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-  return withProtocol.replace(/\/+$/, '');
-}
-
-function getApiBaseUrl() {
-  const apiBaseUrl = sanitizeBaseUrl(state.apiBaseUrl);
-  if (!apiBaseUrl) {
-    throw new Error('Choose a Battleship server before making API requests');
-  }
-  return apiBaseUrl;
-}
-
-function sameServer(a, b) {
-  return sanitizeBaseUrl(a).toLowerCase() === sanitizeBaseUrl(b).toLowerCase();
-}
-
-function serverDisplayName(url) {
-  const match = state.serverList.find((server) => sameServer(server.url, url));
-  return match?.name || url || 'Custom server';
-}
-
-async function loadPublishedServers() {
-  if (!SERVER_LIST_URL) {
-    return;
-  }
-
-  try {
-    const response = await fetch(SERVER_LIST_URL, { cache: 'no-store' });
-    if (!response.ok) {
-      throw new Error(`Server list returned ${response.status}`);
-    }
-
-    const contentType = response.headers.get('content-type') || '';
-    const payload = contentType.includes('application/json') ? await response.json() : await response.text();
-    const loadedServers = normalizeServerList(payload);
-    if (loadedServers.length) {
-      const merged = [...DEFAULT_SERVERS, ...loadedServers];
-      const seen = new Set();
-      state.serverList = merged.filter((server) => {
-        const key = sanitizeBaseUrl(server.url).toLowerCase();
-        if (!key || seen.has(key)) {
-          return false;
-        }
-        seen.add(key);
-        return true;
-      });
-      render();
-    }
-  } catch (error) {
-    state.serverStatusMessage = `Could not load published server list: ${error.message}`;
-    render();
-  }
-}
-
-function normalizeServerList(payload) {
-  if (Array.isArray(payload)) {
-    return payload.map((entry, index) => {
-      if (typeof entry === 'string') {
-        return { name: `Team Server ${index + 1}`, url: sanitizeBaseUrl(entry) };
-      }
-      return {
-        name: entry.name || entry.team || entry.label || `Team Server ${index + 1}`,
-        url: sanitizeBaseUrl(entry.url || entry.baseUrl || entry.base_url),
-      };
-    }).filter((server) => server.url);
-  }
-
-  return String(payload || '')
-    .split(/\r?\n/)
-    .map((line, index) => ({ name: `Team Server ${index + 1}`, url: sanitizeBaseUrl(line) }))
-    .filter((server) => server.url);
-}
-
-async function pingServer(baseUrl) {
-  const response = await fetch(`${baseUrl}/api/players`, {
-    method: 'GET',
-    headers: { Accept: 'application/json' },
-    cache: 'no-store',
-  });
-
-  const text = await response.text();
-  let data = null;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = null;
-  }
-
-  if (!response.ok) {
-    throw new Error(`Ping failed with status ${response.status}`);
-  }
-
-  if (data !== null && typeof data !== 'object') {
-    throw new Error('Server responded, but not with the expected JSON shape');
-  }
-
-  return data;
-}
-
-async function checkServerReachability(showMessage = false) {
-  const baseUrl = sanitizeBaseUrl(state.apiBaseUrl);
-  if (!baseUrl) {
-    state.serverStatus = 'offline';
-    state.serverStatusMessage = 'No server selected';
-    render();
-    return false;
-  }
-
-  state.serverStatus = 'checking';
-  state.serverStatusMessage = 'Checking server...';
-  render();
-
-  try {
-    await pingServer(baseUrl);
-    state.serverStatus = 'online';
-    state.serverStatusMessage = `${serverDisplayName(baseUrl)} is reachable`;
-    if (showMessage) {
-      showSuccess(`Connected to ${serverDisplayName(baseUrl)}`);
-    } else {
-      render();
-    }
-    return true;
-  } catch (error) {
-    state.serverStatus = 'offline';
-    state.serverStatusMessage = error.message.includes('Failed to fetch')
-      ? 'Unreachable. This may be a CORS issue or the server may be down.'
-      : error.message;
-    render();
-    return false;
-  }
-}
-
-async function connectToServer(formData) {
-  const selected = sanitizeBaseUrl(formData.get('server_select'));
-  const manual = sanitizeBaseUrl(formData.get('server_url'));
-  const nextBaseUrl = manual || selected;
-
-  if (!nextBaseUrl) {
-    throw new Error('Enter or select a server URL');
-  }
-
-  state.serverUrlDraft = nextBaseUrl;
-  state.serverStatus = 'checking';
-  state.serverStatusMessage = 'Checking server...';
-  render();
-
-  try {
-    await pingServer(nextBaseUrl);
-  } catch (error) {
-    state.serverStatus = 'offline';
-    state.serverStatusMessage = error.message.includes('Failed to fetch')
-      ? 'Unreachable. This may be a CORS issue or the server may be down.'
-      : error.message;
-    render();
-    throw new Error(`Could not connect to ${nextBaseUrl}. ${state.serverStatusMessage}`);
-  }
-
-  const switchingServers = !sameServer(state.apiBaseUrl, nextBaseUrl);
-  stopPolling();
-  state.apiBaseUrl = nextBaseUrl;
-  state.serverUrlDraft = nextBaseUrl;
-  state.serverStatus = 'online';
-  state.serverStatusMessage = `${serverDisplayName(nextBaseUrl)} is reachable`;
-  state.games = [];
-  state.leaderboard = [];
-
-  if (switchingServers) {
-    clearPlayerSession();
-  }
-
-  persistLocalState();
-  await refreshLobby();
-  await refreshLeaderboard();
-  showSuccess(`Connected to ${serverDisplayName(nextBaseUrl)}${switchingServers ? ". Create or load a player for this server." : ""}`);
-}
-
-async function api(path, options = {}) {
-  const apiBaseUrl = getApiBaseUrl();
-
-  const response = await fetch(`${apiBaseUrl}${path}`, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
-    ...options,
-  });
-
-  const text = await response.text();
-  let data = null;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    data = null;
-  }
-
-  if (!response.ok) {
-    throw new Error(data?.error || `Request failed with status ${response.status}`);
-  }
-
-  return data;
-}
-
-function normalizePlayerResponse(payload) {
-  return {
-    id: payload?.player_id || payload?.id || null,
-    username: payload?.username || payload?.display_name || state.username || '',
-  };
-}
-
-function normalizeStats(stats) {
-  if (!stats) {
-    return null;
-  }
-  const shots = Number(stats.total_shots ?? stats.shots_fired ?? 0);
-  const hits = Number(stats.total_hits ?? stats.hits ?? 0);
-  return {
-    id: stats.player_id || stats.id || null,
-    username: stats.username || stats.display_name || '',
-    games_played: Number(stats.games_played || 0),
-    wins: Number(stats.wins || 0),
-    losses: Number(stats.losses || 0),
-    total_shots: shots,
-    total_hits: hits,
-    accuracy: Number(stats.accuracy || 0),
-  };
-}
-
-function normalizeGame(raw) {
-  if (!raw) {
-    return null;
-  }
-
-  const players = Array.isArray(raw.players)
-    ? raw.players.map((player) => ({
-        id: player.player_id || player.id,
-        player_id: player.player_id || player.id,
-        username: player.username || player.display_name || 'Unknown',
-        display_name: player.display_name || player.username || 'Unknown',
-        turn_order: Number(player.turn_order || 0),
-        placement_done: Boolean(player.placement_done),
-        eliminated: Boolean(player.eliminated),
-        eliminated_at: player.eliminated_at || null,
-      }))
-    : [];
-
-  const currentPlayerId = raw.current_player_id || raw.current_turn || raw.current_turn_player_id || null;
-  const currentPlayer = players.find((player) => player.player_id === currentPlayerId) || null;
-  const winnerPlayer = players.find((player) => player.player_id === raw.winner_id) || null;
-
-  return {
-    id: Number(raw.game_id || raw.id),
-    game_id: Number(raw.game_id || raw.id),
-    status: normalizeStatus(raw.status),
-    grid_size: Number(raw.grid_size || 8),
-    max_players: Number(raw.max_players || players.length || 2),
-    player_count: Number(raw.player_count || players.length),
-    current_turn_index: Number(raw.current_turn_index || 0),
-    current_player_id: currentPlayerId,
-    current_player_username:
-      raw.current_player_username || currentPlayer?.username || currentPlayer?.display_name || null,
-    winner_id: raw.winner_id || null,
-    winner_username:
-      raw.winner_username || winnerPlayer?.username || winnerPlayer?.display_name || null,
-    players,
-  };
-}
-
-function normalizeGameList(rawGames) {
-  if (!Array.isArray(rawGames)) {
-    return [];
-  }
-
-  return rawGames.map((game) => ({
-    id: Number(game.game_id || game.id),
-    game_id: Number(game.game_id || game.id),
-    status: normalizeStatus(game.status),
-    grid_size: Number(game.grid_size || 8),
-    max_players: Number(game.max_players || 2),
-    player_count: Number(game.player_count || 0),
-    open_seats: Math.max(0, Number(game.max_players || 2) - Number(game.player_count || 0)),
-    winner_id: game.winner_id || null,
-    created_at: game.created_at || null,
-  }));
-}
-
-function normalizeMoves(raw) {
-  const source = Array.isArray(raw) ? raw : Array.isArray(raw?.moves) ? raw.moves : [];
-
-  return source.map((move) => ({
-    move_id: move.move_id || move.id || null,
-    player_id: move.player_id,
-    username: move.username || move.display_name || 'Unknown',
-    target_player_id: move.target_player_id || null,
-    target_username: move.target_username || null,
-    row: Number(move.row),
-    col: Number(move.col),
-    result: move.result,
-    hit_player_id: move.hit_player_id || null,
-    hit_username: move.hit_username || null,
-    created_at: move.created_at || move.timestamp || null,
-  }));
-}
-
-async function createOrLoadPlayer(formData) {
-  const username = String(formData.get('username') || '').trim();
-  if (!username) {
-    throw new Error('Enter a username first');
-  }
-
-  let result;
-  let loadedExisting = false;
-
-  try {
-    result = normalizePlayerResponse(
-      await api('/api/players', {
-        method: 'POST',
-        body: JSON.stringify({ username }),
-      })
-    );
-  } catch (error) {
-    if (!/username already taken|conflict/i.test(String(error?.message || ''))) {
-      throw error;
-    }
-
-    const players = await api('/api/players');
-    const existingPlayer = (Array.isArray(players) ? players : []).find((player) => {
-      const candidate = String(player?.username || player?.display_name || '').trim();
-      return candidate === username || candidate.toLowerCase() === username.toLowerCase();
-    });
-
-    if (!existingPlayer) {
-      throw new Error('That username already exists, but the player could not be loaded');
-    }
-
-    result = normalizePlayerResponse(existingPlayer);
-    loadedExisting = true;
-  }
-
-  state.username = result.username || username;
-  state.playerId = result.id;
-  state.currentView = 'game';
-  persistLocalState();
-  await refreshStats();
-  await refreshLeaderboard();
-  showSuccess(loadedExisting ? `Loaded existing player: ${state.username}` : `Player ready: ${state.username}`);
-}
-
-async function createGame(formData) {
-  ensurePlayerReady();
-
-  const gridSize = Number(formData.get('grid_size'));
-  const maxPlayers = Number(formData.get('max_players'));
-
-  const rawGame = await api('/api/games', {
-    method: 'POST',
-    body: JSON.stringify({
-      creator_id: state.playerId,
-      username: state.username,
-      grid_size: gridSize,
-      max_players: maxPlayers,
-    }),
-  });
-
-  state.activeGameId = Number(rawGame.game_id || rawGame.id);
-  state.currentGame = normalizeGame(rawGame);
-  state.myShips = [];
-  state.pendingFleet = createDefaultFleet();
-  syncPendingShipsFromFleet();
-  state.moveHistory = [];
-  persistLocalState();
-  startPolling();
-  await refreshAll();
-  showSuccess(`Game ${state.activeGameId} created — share this Game ID with other players`);
-}
-
-async function joinGameByForm(formData) {
-  const gameId = Number(formData.get('game_id'));
-  state.joinGameIdDraft = String(formData.get('game_id') || '').trim();
-  persistLocalState();
-  if (!Number.isInteger(gameId) || gameId <= 0) {
-    throw new Error('Enter a valid game ID');
-  }
-  await joinGame(gameId);
-}
-
-async function joinGame(gameId) {
-  ensurePlayerReady();
-
-  await api(`/api/games/${gameId}/join`, {
-    method: 'POST',
-    body: JSON.stringify({
-      player_id: state.playerId,
-      username: state.username,
-    }),
-  });
-
-  state.activeGameId = gameId;
-  state.myShips = [];
-  state.pendingFleet = createDefaultFleet();
-  syncPendingShipsFromFleet();
-  state.moveHistory = [];
-  persistLocalState();
-  startPolling();
-  await refreshAll();
-  state.joinGameIdDraft = '';
-  persistLocalState();
-  showSuccess(`Joined game ${gameId}`);
-}
-
-async function refreshLobby() {
-  state.games = normalizeGameList(await api('/api/games'));
-  render();
-}
-
-async function refreshLeaderboard() {
-  try {
-    state.leaderboard = (await api('/api/leaderboard')).map((row) => ({
-      rank: Number(row.rank || 0),
-      ...normalizeStats(row),
-    }));
-  } catch {
-    state.leaderboard = [];
-  }
-  render();
-}
-
-async function refreshStats() {
-  if (!state.playerId) {
-    return;
-  }
-
-  state.myStats = normalizeStats(await api(`/api/players/${state.playerId}/stats`));
-  render();
-}
-
-async function refreshCurrentGame(includeMoves = false) {
-  if (!state.activeGameId) {
-    return;
-  }
-
-  state.currentGame = normalizeGame(await api(`/api/games/${state.activeGameId}`));
-
-  if (state.playerId) {
-    try {
-      state.myShips = await api(`/api/games/${state.activeGameId}/ships?player_id=${encodeURIComponent(state.playerId)}`);
-    } catch {
-      state.myShips = [];
-    }
-  }
-
-  if (includeMoves) {
-    state.moveHistory = normalizeMoves(await api(`/api/games/${state.activeGameId}/moves`));
-  }
-
-  if (state.currentGame?.status === 'finished') {
-    stopPolling();
-  }
-
-  persistLocalState();
-  render();
-}
-
-function startPolling() {
-  stopPolling();
-  state.pollHandle = window.setInterval(() => {
-    Promise.allSettled([
-      refreshLobby(),
-      refreshLeaderboard(),
-      state.playerId ? refreshStats() : Promise.resolve(),
-      state.activeGameId ? refreshCurrentGame(true) : Promise.resolve(),
-    ]);
-  }, 2500);
-}
-
-function stopPolling() {
-  if (state.pollHandle) {
-    clearInterval(state.pollHandle);
-    state.pollHandle = null;
-  }
-}
-
-function ensurePlayerReady() {
-  if (!state.playerId) {
-    throw new Error('Create a player first');
-  }
-}
-
-function ensureCurrentGame() {
-  if (!state.activeGameId || !state.currentGame) {
-    throw new Error('Open or join a game first');
-  }
-}
-
-function getCurrentPlayer() {
-  return state.currentGame?.players?.find((player) => player.player_id === state.playerId) || null;
-}
-
-function currentPlayerNameById(playerId) {
-  return state.currentGame?.players?.find((player) => player.player_id === playerId)?.username || playerId;
-}
-
-function isMyTurn() {
-  return state.currentGame?.status === 'active' && state.currentGame.current_player_id === state.playerId;
-}
-
-function myPlacementSubmitted() {
-  return Boolean(getCurrentPlayer()?.placement_done);
-}
-
-function canStartCurrentGame() {
-  if (!state.currentGame || state.currentGame.status !== 'waiting') {
-    return false;
-  }
-  return state.currentGame.players.length >= 2 && state.currentGame.players.every((player) => player.placement_done);
-}
-
-async function submitShips() {
-  ensurePlayerReady();
-  ensureCurrentGame();
-
-  const pendingShipCells = getPendingShipCells().map(({ row, col }) => ({ row, col }));
-  if (!state.pendingFleet.every(isPendingShipPlaced) || pendingShipCells.length !== 12) {
-    throw new Error('Place all 3 ships (lengths 5, 4, and 3) before submitting');
-  }
-
-  await api(`/api/games/${state.activeGameId}/ships`, {
-    method: 'POST',
-    body: JSON.stringify({
-      player_id: state.playerId,
-      ships: pendingShipCells,
-    }),
-  });
-
-  state.myShips = [...pendingShipCells];
-  state.pendingFleet = createDefaultFleet();
-  syncPendingShipsFromFleet();
-  persistLocalState();
-  await refreshAll();
-  showSuccess('Fleet placed successfully');
-}
-
-async function startCurrentGame() {
-  ensureCurrentGame();
-  await api(`/api/games/${state.activeGameId}/start`, { method: 'POST', body: JSON.stringify({}) });
-  await refreshAll();
-  showSuccess('Game started');
-}
-
-function boardMovesForTarget(targetPlayerId) {
-  return state.moveHistory.filter((move) => move.target_player_id === targetPlayerId);
-}
-
-function moveAtForTarget(targetPlayerId, row, col) {
-  return boardMovesForTarget(targetPlayerId).find((move) => move.row === row && move.col === col) || null;
-}
-
-function canFireAt(targetPlayerId, row, col) {
-  const normalizedTargetPlayerId = Number(targetPlayerId);
-  const opponent = state.currentGame?.players?.find((player) => player.player_id === normalizedTargetPlayerId);
-  return Boolean(
-    isMyTurn() &&
-      opponent &&
-      !opponent.eliminated &&
-      !moveAtForTarget(normalizedTargetPlayerId, row, col)
-  );
-}
-
-async function fireShot(row, col, targetPlayerId) {
-  ensurePlayerReady();
-  ensureCurrentGame();
-
-  if (!canFireAt(targetPlayerId, row, col)) {
-    throw new Error('That square cannot be targeted right now');
-  }
-
-  const result = await api(`/api/games/${state.activeGameId}/moves`, {
-    method: 'POST',
-    body: JSON.stringify({
-      player_id: state.playerId,
-      target_player_id: targetPlayerId,
-      row,
-      col,
-    }),
-  });
-
-  await refreshAll();
-
-  if (result.winner_id) {
-    showSuccess(`Winner: ${currentPlayerNameById(result.winner_id)}`);
-    return;
-  }
-
-  if (result.result === 'sunk' && result.eliminated) {
-    showSuccess(`${currentPlayerNameById(result.eliminated)} has been eliminated`);
-    return;
-  }
-
-  showSuccess(result.result === 'hit' ? 'Hit' : 'Miss');
-}
-
-function render() {
-  const app = document.getElementById('app');
-  const snapshot = captureRenderState();
-
-  if (!state.playerId || state.currentView === 'auth') {
-    app.innerHTML = `
-      <section class="hero">
-        <div>
-          <div class="eyebrow">Phase 2 client</div>
-          <h1>Battleship Arena</h1>
-          <p>Create a player or load an existing one to enter the lobby.</p>
-        </div>
-      </section>
-
-      ${renderBanner()}
-
-      <main class="auth-shell">
-        ${renderServerPanel()}
-        <section class="panel stack auth-panel">
-          <h2>Player Sign In</h2>
-          <form id="player-form" class="stack">
-            <label>
-              Username
-              <input id="username" name="username" value="${escapeHtml(state.username)}" placeholder="Enter username" />
-            </label>
-            <button type="submit">Create / Load Player</button>
-          </form>
-        </section>
-      </main>
-    `;
-    restoreRenderState(snapshot);
-    return;
-  }
-
-  app.innerHTML = `
-    <section class="hero">
-      <div>
-        <div class="eyebrow">Phase 2 client</div>
-        <h1>Battleship Arena</h1>
-        <p>Connected to <strong>${escapeHtml(serverDisplayName(state.apiBaseUrl))}</strong> at <span class="mono wrap">${escapeHtml(state.apiBaseUrl || 'No server selected')}</span>.</p>
-      </div>
-      <div class="actions">
-        <button type="button" class="${state.currentView === 'game' ? '' : 'ghost'}" data-action="go-game-view">Game</button>
-        <button type="button" class="${state.currentView === 'stats' ? '' : 'ghost'}" data-action="go-stats-view">Stats</button>
-        <button type="button" data-action="toggle-theme">
-          ${state.theme === 'dark' ? 'Light Mode' : 'Dark Mode'}
-        </button>
-        <button type="button" class="secondary" data-action="refresh-all">Refresh</button>
-        <button type="button" class="ghost" data-action="clear-session">Clear Session</button>
-        
-      </div>
-    </section>
-
-    ${renderBanner()}
-
-    ${state.currentView === 'stats' ? renderStatsPage() : renderGamePage()}
-  `;
-
-  restoreRenderState(snapshot);
-}
-
-function renderServerPanel() {
-  const statusClass = state.serverStatus === 'online'
-    ? 'online'
-    : state.serverStatus === 'checking'
-      ? 'checking'
-      : state.serverStatus === 'offline'
-        ? 'offline'
-        : '';
-  const statusLabel = state.serverStatus === 'online'
-    ? '✅ live'
-    : state.serverStatus === 'checking'
-      ? 'Checking...'
-      : state.serverStatus === 'offline'
-        ? '❌ unreachable'
-        : 'Not checked';
-  const selectedUrl = state.serverUrlDraft || state.apiBaseUrl || '';
-
-  return `
-    <section class="panel stack server-panel">
-      <div class="section-head">
-        <h2>Server</h2>
-        <span class="badge server-status ${statusClass}">${statusLabel}</span>
-      </div>
-      <form id="server-form" class="stack">
-        <label>
-          Published / Saved Servers
-          <select id="server-select" name="server_select">
-            ${state.serverList.map((server) => `
-              <option value="${escapeHtml(server.url)}" ${sameServer(server.url, selectedUrl) ? 'selected' : ''}>
-                ${escapeHtml(server.name)} — ${escapeHtml(server.url)}
-              </option>
-            `).join('')}
-            ${state.serverList.some((server) => sameServer(server.url, selectedUrl)) || !selectedUrl ? '' : `<option value="${escapeHtml(selectedUrl)}" selected>Custom — ${escapeHtml(selectedUrl)}</option>`}
-          </select>
-        </label>
-        <label>
-          Manual Server URL
-          <input id="server-url" name="server_url" value="${escapeHtml(state.serverUrlDraft || '')}" placeholder="https://team07.cpsc3750.com" />
-        </label>
-        <div class="actions">
-          <button type="submit">Connect</button>
-          <button type="button" class="secondary" data-action="check-server">Ping Current</button>
-        </div>
-      </form>
-      <div class="small wrap">Current base URL: <span class="mono">${escapeHtml(state.apiBaseUrl || '—')}</span></div>
-      <div class="small wrap">${escapeHtml(state.serverStatusMessage || '')}</div>
-    </section>
-  `;
-}
-
-function renderGamePage() {
-  return `
-    <div class="layout">
-      <aside class="stack lobby-col">
-        ${renderServerPanel()}
-        <section class="panel stack">
-          <h2>Create Game</h2>
-          <form id="create-game-form" class="stack">
-            <div class="row">
-              <label>
-                Grid Size
-                <select name="grid_size">
-                  ${[5, 6, 7, 8, 9, 10].map((n) => `<option value="${n}" ${n === 8 ? 'selected' : ''}>${n} × ${n}</option>`).join('')}
-                </select>
-              </label>
-              <label>
-                Max Players
-                <select name="max_players">
-                  ${[2, 3, 4].map((n) => `<option value="${n}" ${n === 2 ? 'selected' : ''}>${n}</option>`).join('')}
-                </select>
-              </label>
-            </div>
-            <button type="submit">Create Game</button>
-          </form>
-        </section>
-
-        <section class="panel stack">
-          <div class="section-head">
-            <h2>Open Games</h2>
-            <span class="badge">${state.games.filter((game) => game.status === 'waiting').length} waiting</span>
-          </div>
-          <form id="join-by-id-form" class="stack compact-form">
-            <div class="callout">
-              <strong>Joining a friend?</strong>
-              <div class="small">Enter the Game ID shown in their lobby card or Active Game ID box.</div>
-            </div>
-            <label>
-              Join by Game ID
-              <input name="game_id" type="number" min="1" inputmode="numeric" value="${escapeHtml(state.joinGameIdDraft)}" placeholder="Example: 42" />
-            </label>
-            <button type="submit" class="secondary">Join This Game</button>
-          </form>
-          ${renderLobbyGames()}
-        </section>
-      </aside>
-
-      <main class="stack game-col">
-        <section class="panel stack">
-          <div class="section-head">
-            <h2>Current Game</h2>
-            ${state.currentGame ? `<button class="ghost" data-action="leave-current-game">Close Game View</button>` : ''}
-          </div>
-          ${renderCurrentGameSummary()}
-        </section>
-
-        ${state.currentGame ? `
-          <section class="panel stack">
-            <div class="section-head">
-              <h2>Boards</h2>
-              <span class="badge ${isMyTurn() ? 'active' : ''}">${isMyTurn() ? 'Your turn' : 'Watching'}</span>
-            </div>
-            <div class="boards-grid">
-              ${renderMyBoardCard()}
-              ${renderOpponentBoards()}
-            </div>
-          </section>
-
-          <section class="panel stack">
-            <div class="section-head">
-              <h2>Move History</h2>
-              <span class="badge">${state.moveHistory.length} moves</span>
-            </div>
-            ${renderMoveHistory()}
-          </section>
-        ` : `
-          <section class="panel empty-state">
-            <h2>No Game Open</h2>
-            <p>Create a new lobby or join one from the left.</p>
-          </section>
-        `}
-      </main>
-    </div>
-  `;
-}
-
-function renderStatsPage() {
-  return `
-    <div class="layout">
-      <aside class="stack identity-col">
-        ${renderServerPanel()}
-        <section class="panel stack">
-          <h2>Player</h2>
-          <div class="info-grid">
-            <div class="stat"><div class="label">Username</div><div class="value wrap">${escapeHtml(state.username || '—')}</div></div>
-            <div class="stat"><div class="label">Player ID</div><div class="value wrap">${escapeHtml(state.playerId || '—')}</div></div>
-            <div class="stat"><div class="label">Active Game ID</div><div class="value">${escapeHtml(state.activeGameId || '—')}</div></div>
-          </div>
-        </section>
-      </aside>
-
-      <main class="stack game-col">
-        <section class="panel stack">
-          <h2>Your Stats</h2>
-          ${renderMyStats()}
-        </section>
-
-        <section class="panel stack">
-          <div class="section-head">
-            <h2>Leaderboard</h2>
-            <span class="badge">Top ${Math.min(5, state.leaderboard.length)}</span>
-          </div>
-          ${renderLeaderboard()}
-        </section>
-      </main>
-    </div>
-  `;
-}
-
-function renderBanner() {
-  if (state.error) {
-    return `<div class="message error">${escapeHtml(state.error)}</div>`;
-  }
-  if (state.success) {
-    return `<div class="message success">${escapeHtml(state.success)}</div>`;
-  }
-  if (!state.playerId) {
-    return `<div class="message info">Register a player, then create or join a game.</div>`;
-  }
-  if (!state.activeGameId) {
-    return `<div class="message info">You are signed in as <strong>${escapeHtml(state.username)}</strong>. Pick an open game or start a new one.</div>`;
-  }
-  if (state.currentGame?.status === 'finished') {
-    return `<div class="message success">Game over${state.currentGame.winner_username ? ` — winner: <strong>${escapeHtml(state.currentGame.winner_username)}</strong>` : ''}.</div>`;
-  }
-  if (state.currentGame?.status === 'waiting') {
-    return `<div class="message info">Waiting for all players to place ships${canStartCurrentGame() ? ' — this game can start now.' : '.'}</div>`;
-  }
-  return `<div class="message info">${isMyTurn() ? 'It is your turn.' : `Waiting for ${escapeHtml(state.currentGame?.current_player_username || 'the next player')}.`}</div>`;
-}
-
-function renderLobbyGames() {
-  if (!state.games.length) {
-    return `<div class="small">No games yet.</div>`;
-  }
-
-  const perPage = state.gamesPerPage || 5;
-  const totalPages = Math.max(1, Math.ceil(state.games.length / perPage));
-
-  // Clamp the current page in case games were removed since last render.
-  if (state.currentPage > totalPages) state.currentPage = totalPages;
-  if (state.currentPage < 1) state.currentPage = 1;
-
-  const start = (state.currentPage - 1) * perPage;
-  const pageGames = state.games.slice(start, start + perPage);
-
-  const paginationControls = totalPages > 1 ? `
-    <div class="actions" style="justify-content: space-between; margin-top: 0.75rem;">
-      <button class="ghost" data-action="prev-page" ${state.currentPage === 1 ? 'disabled' : ''}>Prev</button>
-      <span class="small">Page ${state.currentPage} of ${totalPages} • ${state.games.length} games</span>
-      <button class="ghost" data-action="next-page" ${state.currentPage === totalPages ? 'disabled' : ''}>Next</button>
-    </div>
-  ` : '';
-
-  return `
-    <div class="game-list">
-      ${pageGames.map((game) => {
-        const isOpen = game.status === 'waiting';
-        const isCurrent = game.id === state.activeGameId;
-        return `
-          <div class="game-card ${isCurrent ? 'current' : ''}">
-            <div>
-              <strong>Game ${game.id}</strong>
-              <div class="small">Game ID: <strong>${game.id}</strong> • ${game.grid_size}×${game.grid_size} • ${game.player_count}/${game.max_players} players</div>
-            </div>
-            <div class="game-actions">
-              <span class="badge ${game.status === 'active' ? 'active' : ''}">${escapeHtml(game.status)}</span>
-              <button type="button" class="ghost" data-action="copy-game-id" data-game-id="${game.id}">Copy ID</button>
-              ${isCurrent ? `<button type="button" class="ghost" data-action="open-game" data-game-id="${game.id}">Open</button>` : ''}
-              ${!isCurrent ? `<button type="button" class="ghost" data-action="open-game" data-game-id="${game.id}">View</button>` : ''}
-              ${isOpen ? `<button type="button" data-action="join-game" data-game-id="${game.id}" ${!state.playerId ? 'disabled' : ''}>Join</button>` : ''}
-            </div>
-          </div>
-        `;
-      }).join('')}
-    </div>
-    ${paginationControls}
-  `;
-}
-
-function renderMyStats() {
-  if (!state.myStats) {
-    return `<div class="small">No stats yet.</div>`;
-  }
-
-  return `
-    <div class="info-grid">
-      <div class="stat"><div class="label">Games</div><div class="value">${state.myStats.games_played}</div></div>
-      <div class="stat"><div class="label">Wins</div><div class="value">${state.myStats.wins}</div></div>
-      <div class="stat"><div class="label">Losses</div><div class="value">${state.myStats.losses}</div></div>
-      <div class="stat"><div class="label">Shots</div><div class="value">${state.myStats.total_shots}</div></div>
-      <div class="stat"><div class="label">Hits</div><div class="value">${state.myStats.total_hits}</div></div>
-      <div class="stat"><div class="label">Accuracy</div><div class="value">${(state.myStats.accuracy * 100).toFixed(1)}%</div></div>
-    </div>
-  `;
-}
-
-function renderLeaderboard() {
-  if (!state.leaderboard.length) {
-    return `<div class="small">Leaderboard will appear after players start finishing games.</div>`;
-  }
-
-  const topFive = state.leaderboard.slice(0, 5);
-
-  return `
-    <div class="leaderboard-list">
-      ${topFive.map((entry) => `
-        <div class="leaderboard-row ${entry.id === state.playerId ? 'me' : ''}">
-          <div>
-            <strong>#${entry.rank} ${escapeHtml(entry.username || 'Unknown')}</strong>
-            <div class="small">${entry.wins} wins • ${(entry.accuracy * 100).toFixed(1)}% accuracy</div>
-          </div>
-          <div class="small">${entry.total_shots} shots</div>
-        </div>
-      `).join('')}
-    </div>
-  `;
-}
-
-function renderCurrentGameSummary() {
-  if (!state.currentGame) {
-    return `<div class="small">Open a game to see the battle view.</div>`;
-  }
-
-  return `
-    <div class="summary-grid">
-      <div class="summary-card summary-card-emphasis">
-        <div class="label">Game ID</div>
-        <div class="value">${state.currentGame.game_id}</div>
-        <div class="summary-actions">
-          <button class="ghost small-button" data-action="copy-game-id" data-game-id="${state.currentGame.game_id}">Copy ID</button>
-        </div>
-      </div>
-      <div class="summary-card">
-        <div class="label">Status</div>
-        <div class="value">${escapeHtml(state.currentGame.status)}</div>
-      </div>
-      <div class="summary-card">
-        <div class="label">Grid</div>
-        <div class="value">${state.currentGame.grid_size} × ${state.currentGame.grid_size}</div>
-      </div>
-      <div class="summary-card">
-        <div class="label">Players</div>
-        <div class="value">${state.currentGame.players.length}/${state.currentGame.max_players}</div>
-      </div>
-      <div class="summary-card">
-        <div class="label">Current Turn</div>
-        <div class="value">${escapeHtml(state.currentGame.current_player_username || '—')}</div>
-      </div>
-    </div>
-
-    <div class="players-strip">
-      ${state.currentGame.players.map((player) => `
-        <div class="player-pill ${player.player_id === state.currentGame.current_player_id ? 'turn' : ''} ${player.eliminated ? 'eliminated' : ''}">
-          <div>
-            <strong>${escapeHtml(player.username)}</strong>
-            <div class="small">Turn ${player.turn_order + 1}</div>
-          </div>
-          <div class="pill-tags">
-            ${player.placement_done ? '<span class="badge">Placed</span>' : '<span class="badge">Waiting</span>'}
-            ${player.eliminated ? '<span class="badge">Eliminated</span>' : ''}
-            ${player.player_id === state.currentGame.current_player_id ? '<span class="badge active">Current</span>' : ''}
-          </div>
-        </div>
-      `).join('')}
-    </div>
-
-    <div class="actions">
-      <button class="secondary" data-action="start-game" ${canStartCurrentGame() ? '' : 'disabled'}>Start Game</button>
-    </div>
-  `;
-}
-
-function renderMyBoardCard() {
-  const currentPlayer = getCurrentPlayer();
-  const placementNote = !currentPlayer
-    ? 'You are viewing this game, but you have not joined it.'
-    : myPlacementSubmitted()
-      ? 'Your fleet is locked in and incoming shots show here.'
-      : `Drag the 5, 4, and 3 length ships onto your board. ${fleetPlacementSummary()}.`;
-
-  return `
-    <section class="board-card stack">
-      <div class="board-head">
-        <div>
-          <h3>Your Board</h3>
-          <div class="small">${escapeHtml(placementNote)}</div>
-        </div>
-        <div class="pill-tags">
-          ${myPlacementSubmitted() ? '<span class="badge active">Placed</span>' : '<span class="badge">Setup</span>'}
-        </div>
-      </div>
-      ${!myPlacementSubmitted() && currentPlayer ? renderFleetBuilder() : ''}
-      ${renderBoard({
-        boardType: 'self',
-        playerId: state.playerId,
-        title: 'Your board',
-      })}
-      <div class="actions">
-        <button data-action="submit-ships" ${canSubmitShips() ? '' : 'disabled'}>Submit Fleet</button>
-        <button class="secondary" data-action="clear-pending-ships" ${canClearPendingShips() ? '' : 'disabled'}>Reset Fleet</button>
-      </div>
-    </section>
-  `;
-}
-
-
-function renderShipSvg(length, orientation) {
-  const seg = 22;          // pixels per cell segment
-  const thickness = 20;    // short-axis thickness of the hull
-  const long = length * seg;
-  const vertical = orientation === 'vertical';
-  const w = vertical ? thickness : long;
-  const h = vertical ? long : thickness;
-  const nose = seg * 0.55;
-
-  // Hull path: rounded rectangle with one pointed end (bow).
-  const hull = vertical
-    ? `M ${w / 2} 0 L ${w} ${nose} L ${w} ${h - 3} Q ${w} ${h} ${w - 3} ${h} L 3 ${h} Q 0 ${h} 0 ${h - 3} L 0 ${nose} Z`
-    : `M ${w} ${h / 2} L ${w - nose} 0 L 3 0 Q 0 0 0 3 L 0 ${h - 3} Q 0 ${h} 3 ${h} L ${w - nose} ${h} Z`;
-
-  // Bridge / tower centered on the hull.
-  const tw = vertical ? 8 : 12;
-  const th = vertical ? 12 : 8;
-  const tx = (w - tw) / 2;
-  const ty = (h - th) / 2;
-
-  return `
-    <svg class="ship-svg" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-      <path d="${hull}" fill="var(--ship)" stroke="rgba(5, 8, 15, 0.55)" stroke-width="1.2" stroke-linejoin="round" />
-      <rect x="${tx}" y="${ty}" width="${tw}" height="${th}" fill="rgba(5, 8, 15, 0.6)" rx="1.5" />
-    </svg>
-  `;
-}
-
-function renderFleetBuilder() {
-  return `
-    <div class="fleet-builder stack">
-      <div class="callout">
-        <strong>Place your fleet</strong>
-        <div class="small">Drag each ship onto your board. Use Rotate to switch orientation.</div>
-      </div>
-      <div class="fleet-list">
-        ${state.pendingFleet.map((ship) => {
-          const placed = isPendingShipPlaced(ship);
-          return `
-            <div class="fleet-row ${placed ? 'placed' : ''} ${ship.orientation}" draggable="true" data-draggable-ship-id="${ship.id}">
-              <div class="ship-graphic">
-                ${renderShipSvg(ship.length, ship.orientation)}
-              </div>
-              <div class="fleet-row-actions">
-                <button type="button" class="ghost small-button" data-action="rotate-pending-ship" data-ship-id="${ship.id}">Rotate</button>
-                <button type="button" class="ghost small-button" data-action="reset-pending-ship" data-ship-id="${ship.id}" ${placed ? '' : 'disabled'}>Remove</button>
-              </div>
-            </div>
-          `;
-        }).join('')}
-      </div>
-    </div>
-  `;
-}
-
-function renderOpponentBoards() {
-  const opponents = state.currentGame.players.filter((player) => player.player_id !== state.playerId);
-  if (!opponents.length) {
-    return `<div class="board-card"><div class="small">Waiting for opponents to join.</div></div>`;
-  }
-
-  return opponents.map((player) => `
-    <section class="board-card stack">
-      <div class="board-head">
-        <div>
-          <h3>${escapeHtml(player.username)}</h3>
-          <div class="small">${player.eliminated ? 'Eliminated' : 'Fire on this board when it is your turn.'}</div>
-        </div>
-        <div class="pill-tags">
-          ${player.eliminated ? '<span class="badge">Eliminated</span>' : ''}
-          ${player.player_id === state.currentGame.current_player_id ? '<span class="badge active">Current</span>' : ''}
-        </div>
-      </div>
-      ${renderBoard({
-        boardType: 'target',
-        playerId: player.player_id,
-        title: player.username,
-      })}
-    </section>
-  `).join('');
-}
-
-function renderBoard({ boardType, playerId }) {
-  const gridSize = state.currentGame?.grid_size || 8;
-  const header = `
-    <div class="board-row">
-      <div class="axis-cell"></div>
-      ${Array.from({ length: gridSize }, (_, index) => `<div class="axis-cell">${index}</div>`).join('')}
-    </div>
-  `;
-
-  const rows = Array.from({ length: gridSize }, (_, row) => {
-    const cells = Array.from({ length: gridSize }, (_, col) => renderCell({ boardType, playerId, row, col })).join('');
-    return `<div class="board-row"><div class="axis-cell">${row}</div>${cells}</div>`;
-  }).join('');
-
-  return `<div class="board board-${boardType}">${header}${rows}</div>`;
-}
-
-function renderCell({ boardType, playerId, row, col }) {
-  const classes = ['cell'];
-  let attrs = '';
-
-  const targetedPlayer = state.currentGame?.players?.find((p) => p.player_id === playerId);
-  const playerEliminated = Boolean(targetedPlayer?.eliminated);
-
-  if (boardType === 'self') {
-    const liveShipCells = myPlacementSubmitted() ? state.myShips : state.pendingShips;
-    const hasShip = liveShipCells.some((ship) => ship.row === row && ship.col === col);
-    const incomingMove = moveAtForTarget(playerId, row, col);
-
-    if (hasShip) {
-      classes.push('ship');
-    }
-
-    if (incomingMove) {
-      const wasHit = incomingMove.result === 'hit' || incomingMove.result === 'sunk';
-      const impactClass = wasHit ? (playerEliminated ? 'sunk' : 'hit') : 'miss';
-      classes.push(impactClass);
-    }
-
-    if (getCurrentPlayer() && !myPlacementSubmitted() && state.currentGame?.status === 'waiting') {
-      classes.push('interactive', 'droppable');
-      attrs = `data-drop-ship-cell="true" data-row="${row}" data-col="${col}"`;
-    } else {
-      classes.push('disabled');
-    }
-  }
-
-  if (boardType === 'target') {
-    const move = moveAtForTarget(playerId, row, col);
-
-    if (move) {
-      const wasHit = move.result === 'hit' || move.result === 'sunk';
-      const impactClass = wasHit ? (playerEliminated ? 'sunk' : 'hit') : 'miss';
-      classes.push(impactClass);
-    }
-
-    if (canFireAt(playerId, row, col)) {
-      classes.push('interactive');
-      attrs = `data-action="fire-shot" data-row="${row}" data-col="${col}" data-target-player-id="${playerId}"`;
-    } else {
-      classes.push('disabled');
-    }
-  }
-
-  return `<button class="${classes.join(' ')}" ${attrs} ${attrs ? '' : 'disabled'}></button>`;
-}
-
-function renderMoveHistory() {
-  if (!state.moveHistory.length) {
-    return `<div class="small">No shots fired yet.</div>`;
-  }
-
-  return `
-    <div class="log">
-      ${[...state.moveHistory].reverse().map((move) => {
-        const stamp = formatTimestamp(move.created_at);
-        const targetName = move.target_username || currentPlayerNameById(move.target_player_id);
-        const result = move.result === 'hit' ? 'HIT' : move.result === 'sunk' ? 'SUNK' : 'MISS';
-        return `
-          <div class="log-item">
-            <div class="log-head">
-              <strong>${escapeHtml(move.username)}</strong>
-              <span class="small">${escapeHtml(stamp)}</span>
-            </div>
-            <div>
-              Fired at <strong>${escapeHtml(targetName)}</strong> on (${move.row}, ${move.col}) — <strong>${result}</strong>
-            </div>
-          </div>
-        `;
-      }).join('')}
-    </div>
-  `;
-}
-
-function formatTimestamp(value) {
-  if (!value) {
-    return '—';
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return String(value);
-  }
-  return date.toLocaleString([], {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
-}
-
-function canSubmitShips() {
-  return Boolean(getCurrentPlayer())
-    && state.currentGame.status === 'waiting'
-    && !myPlacementSubmitted()
-    && state.pendingFleet.every(isPendingShipPlaced)
-    && getPendingShipCells().length === 12;
-}
-
-function canClearPendingShips() {
-  return Boolean(getCurrentPlayer())
-    && state.currentGame.status === 'waiting'
-    && !myPlacementSubmitted()
-    && state.pendingFleet.some(isPendingShipPlaced);
-}
-
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=JetBrains+Mono:wght@400;500;600&family=Outfit:wght@300;400;500;600;700&display=swap');
+
+/* ============================================================
+   DESIGN TOKENS — tactical command-console theme
+   ============================================================ */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces — stepped navy */
+  --bg-void:     #05080f;
+  --bg:          #0a1020;
+  --surface-1:   #101830;
+  --surface-2:   #16203c;
+  --surface-3:   #1d2a4d;
+
+  /* Borders */
+  --line:        rgba(148, 175, 230, 0.10);
+  --line-strong: rgba(148, 175, 230, 0.22);
+
+  /* Signal colors */
+  --sonar:       #38bdf8;
+  --sonar-bright:#7dd3fc;
+  --sonar-soft:  rgba(56, 189, 248, 0.10);
+  --sonar-glow:  rgba(56, 189, 248, 0.28);
+  --alert:       #fbbf24;
+  --alert-soft:  rgba(251, 191, 36, 0.14);
+  --hit:         #f43f5e;
+  --hit-soft:    rgba(244, 63, 94, 0.15);
+  --sunk:        #fb923c;
+  --sunk-soft:   rgba(251, 146, 60, 0.18);
+  --miss:        #64748b;
+  --miss-soft:   rgba(100, 116, 139, 0.18);
+  --ship:        #2dd4bf;
+  --ship-soft:   rgba(45, 212, 191, 0.18);
+  --ok:          #34d399;
+
+  /* Text */
+  --ink:         #e2e8f0;
+  --ink-bright:  #f8fafc;
+  --ink-muted:   #94a3b8;
+  --ink-dim:     #64748b;
+
+  /* Type */
+  --font-display: 'Bricolage Grotesque', ui-sans-serif, system-ui, sans-serif;
+  --font-body:    'Outfit', ui-sans-serif, system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', ui-monospace, monospace;
+
+  /* Radii */
+  --r-sm: 6px;
+  --r:    10px;
+  --r-lg: 14px;
+}
+
+:root[data-theme="light"] {
+  --bg: #f4f7fb;
+  --panel: #ffffff;
+  --panel-soft: #eef4fb;
+  --panel-strong: #dbeafe;
+  --text: #102033;
+  --muted: #52677f;
+  --border: #c8d7ea;
+  --accent: #0ea5e9;
+  --accent-strong: #0284c7;
+  --success: #047857;
+  --danger: #dc2626;
+  --warning: #ca8a04;
+  --cell: #38bdf8;
+  --cell-dark: #0ea5e9;
+  --ship: #16a34a;
+}
+:root[data-theme="light"] body {
+  background:
+    linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px),
+    var(--bg);
+  color: var(--text);
+}
+
+:root[data-theme="light"] input,
+:root[data-theme="light"] select {
+  background: #ffffff;
+  color: var(--text);
+  border-color: var(--border);
+}
+
+:root[data-theme="light"] .panel,
+:root[data-theme="light"] .board-card,
+:root[data-theme="light"] .game-card,
+:root[data-theme="light"] .summary-card,
+:root[data-theme="light"] .stat,
+:root[data-theme="light"] .player-pill,
+:root[data-theme="light"] .log-item {
+  background: var(--panel);
+  border-color: var(--border);
+}
+
+:root[data-theme="light"] .cell {
+  background: #38bdf8;
+}
+
+:root[data-theme="light"] .cell.ship {
+  background: #16a34a;
+}
+
+:root[data-theme="light"] .cell.hit,
+:root[data-theme="light"] .cell.sunk {
+  background: #dc2626;
+}
+
+:root[data-theme="light"] .cell.miss {
+  background: #93c5fd;
+}
+/* ============================================================
+   RESET + BASE
+   ============================================================ */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { margin: 0; padding: 0; }
+
+body {
+  min-height: 100vh;
+  font-family: var(--font-body);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink);
+  background-color: var(--bg);
+  /* Nautical chart grid — barely there */
+  background-image:
+    linear-gradient(to right, rgba(56, 189, 248, 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(56, 189, 248, 0.035) 1px, transparent 1px);
+  background-size: 40px 40px;
+  background-attachment: fixed;
+}
+
+/* ============================================================
+   TYPOGRAPHY
+   ============================================================ */
+h1, h2, h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--ink-bright);
+  line-height: 1.15;
+}
+
+h1 { font-size: 1.9rem; letter-spacing: -0.02em; }
+h2 { font-size: 1.05rem; font-weight: 600; }
+h3 { font-size: 0.95rem; font-weight: 600; }
+
+p { margin: 0; }
+
+.eyebrow {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--sonar);
+}
+
+.small {
+  font-size: 0.83rem;
+  color: var(--ink-muted);
+}
+
+.mono { font-family: var(--font-mono); }
+
+.wrap { overflow-wrap: anywhere; word-break: break-all; }
+
+/* ============================================================
+   APP SHELL  —  2 columns, no overlap possible
+   ============================================================ */
+#app {
+  max-width: 1560px;
+  margin: 0 auto;
+  padding: 1.75rem 1.5rem 3rem;
+}
+
+.hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  padding-bottom: 1.25rem;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 1.5rem;
+}
+
+.hero > div:first-child h1 { margin-top: 0.25rem; }
+
+.hero p {
+  margin-top: 0.3rem;
+  color: var(--ink-muted);
+  font-size: 0.9rem;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 1.75rem;
+  align-items: start;
+}
+
+/* The .sidebar wrapper is the sole left-column grid child. Inside it,
+   identity-col and lobby-col stack via flex so they always sit
+   back-to-back, independent of how tall the game column grows. */
+.sidebar {
+  grid-column: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.identity-col,
+.lobby-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.game-col,
+main.stack {
+  grid-column: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+aside.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+/* ============================================================
+   PANEL  —  NO box-shadow. Borders + surface tints only.
+   ============================================================ */
+.panel {
+  background: var(--surface-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  min-width: 0;
+}
+
+.panel h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.panel h2::before {
+  content: "";
+  width: 3px;
+  height: 1em;
+  background: var(--sonar);
+  border-radius: 2px;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.section-head h2 { margin: 0; }
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  min-width: 0;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+}
+
+/* ============================================================
+   FORM CONTROLS
+   ============================================================ */
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+input, select {
+  width: 100%;
+  font-family: var(--font-body);
+  font-size: 0.95rem;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink);
+  background: var(--bg-void);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r);
+  padding: 0.7rem 0.85rem;
+  outline: none;
+  transition: border-color 140ms, box-shadow 140ms;
+}
+
+input::placeholder { color: var(--ink-dim); }
+
+input:focus, select:focus {
+  border-color: var(--sonar);
+  box-shadow: 0 0 0 3px var(--sonar-soft);
+}
+
+/* ============================================================
+   BUTTONS
+   ============================================================ */
+button {
+  font-family: var(--font-body);
+  font-size: 0.88rem;
+  font-weight: 600;
+  padding: 0.65rem 1rem;
+  border-radius: var(--r);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 140ms, border-color 140ms, color 140ms, transform 60ms;
+  letter-spacing: 0;
+}
+
+button:active:not(:disabled) { transform: translateY(1px); }
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Primary — cyan sonar */
+button[type="submit"],
+button:not(.ghost):not(.secondary) {
+  background: var(--sonar);
+  color: var(--bg-void);
+  border-color: var(--sonar);
+}
+
+button[type="submit"]:hover:not(:disabled),
+button:not(.ghost):not(.secondary):hover:not(:disabled) {
+  background: var(--sonar-bright);
+  border-color: var(--sonar-bright);
+}
+
+button.secondary {
+  background: var(--surface-2);
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+button.secondary:hover:not(:disabled) {
+  background: var(--surface-3);
+  border-color: var(--sonar);
+}
+
+button.ghost {
+  background: transparent;
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+button.ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--sonar);
+  color: var(--sonar-bright);
+}
+
+button.small-button {
+  padding: 0.4rem 0.7rem;
+  font-size: 0.78rem;
+}
+
+.actions {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+/* ============================================================
+   BADGE / CALLOUT
+   ============================================================ */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.3rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--line-strong);
+  color: var(--ink-muted);
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+
+.badge.active {
+  color: var(--bg-void);
+  background: var(--sonar);
+  border-color: var(--sonar);
+}
+
+.callout {
+  background: var(--sonar-soft);
+  border: 1px solid var(--sonar-glow);
+  border-radius: var(--r);
+  padding: 0.7rem 0.85rem;
+  font-size: 0.87rem;
+}
+
+.callout strong { color: var(--ink-bright); }
+
+/* ============================================================
+   MESSAGES
+   ============================================================ */
+.message {
+  padding: 0.75rem 0.9rem;
+  border-radius: var(--r);
+  font-weight: 500;
+  margin-bottom: 1rem;
+  border: 1px solid transparent;
+}
+
+.message.error {
+  background: var(--hit-soft);
+  border-color: rgba(244, 63, 94, 0.4);
+  color: #fecaca;
+}
+
+.message.success {
+  background: rgba(52, 211, 153, 0.12);
+  border-color: rgba(52, 211, 153, 0.4);
+  color: #a7f3d0;
+}
+
+.message.info {
+  background: var(--sonar-soft);
+  border-color: var(--sonar-glow);
+  color: var(--sonar-bright);
+}
+
+/* ============================================================
+   STATS / INFO GRID
+   ============================================================ */
+.info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 0.55rem;
+}
+
+.stat {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 0.65rem 0.75rem;
+  min-width: 0;
+}
+
+.stat .label {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+.stat .value {
+  margin-top: 0.3rem;
+  font-family: var(--font-mono);
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--ink-bright);
+  overflow-wrap: anywhere;
+}
+
+/* ============================================================
+   GAME LIST / LEADERBOARD
+   ============================================================ */
+.game-list,
+.leaderboard-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.game-card {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 0.75rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  transition: border-color 140ms, background 140ms;
+}
+
+.game-card:hover { border-color: var(--line-strong); }
+
+.game-card.current {
+  border-color: var(--sonar);
+  background: var(--sonar-soft);
+}
+
+.game-card strong { color: var(--ink-bright); font-weight: 600; }
+
+.game-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.game-actions button { padding: 0.38rem 0.7rem; font-size: 0.78rem; }
+
+.leaderboard-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+
+.leaderboard-row strong {
+  font-family: var(--font-display);
+  color: var(--ink-bright);
+  font-weight: 600;
+}
+
+.leaderboard-row.me {
+  border-color: var(--ok);
+  background: rgba(52, 211, 153, 0.08);
+}
+
+/* ============================================================
+   SUMMARY GRID (Current Game stat strip)
+   ============================================================ */
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.6rem;
+}
+
+.summary-card {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 0.7rem 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.summary-card .label {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+.summary-card .value {
+  font-family: var(--font-mono);
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: var(--ink-bright);
+  overflow-wrap: anywhere;
+}
+
+.summary-card-emphasis {
+  border-color: var(--sonar);
+  background: var(--sonar-soft);
+}
+
+.summary-actions { margin-top: 0.25rem; }
+
+/* ============================================================
+   PLAYER PILLS (with pulsing active-turn indicator)
+   ============================================================ */
+.players-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0.6rem;
+}
+
+.player-pill {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 0.7rem 0.85rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  position: relative;
+}
+
+.player-pill strong {
+  color: var(--ink-bright);
+  font-family: var(--font-display);
+  font-weight: 600;
+}
+
+.player-pill.turn {
+  border-color: var(--alert);
+  background: var(--alert-soft);
+}
+
+.player-pill.turn::after {
+  content: "";
+  position: absolute;
+  top: 0.65rem; right: 0.7rem;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--alert);
+  box-shadow: 0 0 8px var(--alert);
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+.player-pill.eliminated {
+  opacity: 0.55;
+  border-style: dashed;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.4; transform: scale(1.4); }
+}
+
+/* ============================================================
+   BOARDS
+   ============================================================ */
+.boards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  gap: 1rem;
+}
+
+.board-card {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.board-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.board-head h3 {
+  font-family: var(--font-display);
+  font-weight: 700;
+}
+
+.board {
+  display: inline-grid;
+  gap: 3px;
+  background: var(--bg-void);
+  padding: 8px;
+  border-radius: var(--r);
+  border: 1px solid var(--line-strong);
+  width: fit-content;
+  max-width: 100%;
+  overflow: auto;
+}
+
+.board-row {
+  display: flex;
+  gap: 3px;
+}
+
+.cell, .axis-cell {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 500;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.axis-cell {
+  background: transparent;
+  color: var(--ink-dim);
+  font-weight: 500;
+}
+
+.cell {
+  background: #0a1835;               /* dark navy water */
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  color: transparent;
+  transition: background 100ms, border-color 100ms;
+}
+
+.cell.interactive { cursor: crosshair; }
+.cell.interactive:hover {
+  background: var(--sonar-soft);
+  border-color: var(--sonar);
+}
+
+/* ---- OWN BOARD ---- */
+/* Your placed ships: green */
+.board-self .cell.ship {
+  background: #22c55e;
+  border-color: rgba(5, 8, 15, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.6);
+}
+
+/* Your ship got hit: red */
+.board-self .cell.hit {
+  background: #ef4444;
+  border-color: #b91c1c;
+  box-shadow: none;
+}
+.board-self .cell.hit::after { content: "✕"; color: #fff; font-weight: 700; }
+
+/* Your fleet is fully sunk: dark red */
+.board-self .cell.sunk {
+  background: #7f1d1d;
+  border-color: #450a0a;
+  box-shadow: none;
+}
+.board-self .cell.sunk::after { content: "✕"; color: #fca5a5; font-weight: 700; }
+
+/* ---- OPPONENT BOARD ---- */
+/* You hit an enemy ship: orange */
+.board-target .cell.hit {
+  background: #f97316;
+  border-color: #9a3412;
+}
+.board-target .cell.hit::after { content: "✕"; color: #fff7ed; font-weight: 700; }
+
+/* You sunk the enemy's fleet: all their hit cells go red */
+.board-target .cell.sunk {
+  background: #ef4444;
+  border-color: #7f1d1d;
+}
+.board-target .cell.sunk::after { content: "✕"; color: #fff; font-weight: 700; }
+
+/* ---- SHARED ---- */
+.cell.miss {
+  background: var(--miss-soft);
+  border-color: var(--miss);
+}
+.cell.miss::after { content: "·"; color: var(--miss); font-size: 1.3rem; line-height: 0; }
+
+.cell.disabled { opacity: 0.55; cursor: not-allowed; }
+
+.cell.droppable {
+  outline: 1px dashed rgba(56, 189, 248, 0.35);
+  outline-offset: -4px;
+}
+
+/* ============================================================
+   SHIP / FLEET BUILDER  —  compact list, draggable SVG per ship
+   ============================================================ */
+.fleet-builder { gap: 0.9rem; }
+
+.fleet-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.fleet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 0.9rem;
+  background: var(--surface-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r);
+  min-width: 0;
+  cursor: grab;
+  min-height: 52px;
+}
+
+.fleet-row:active { cursor: grabbing; }
+
+.fleet-row.placed {
+  border-color: var(--ship);
+  background: rgba(45, 212, 191, 0.08);
+}
+
+.ship-graphic {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+}
+
+.ship-svg {
+  display: block;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35));
+  pointer-events: none; /* clicks/drags go through to the fleet-row */
+}
+
+.fleet-row-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.pill-tags {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* ============================================================
+   MOVE LOG
+   ============================================================ */
+.log-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.25rem;
+}
+
+.log {
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding-right: 0.3rem;
+}
+
+.log-item {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  padding: 0.55rem 0.7rem;
+  font-size: 0.86rem;
+}
+
+.log-item strong { color: var(--ink-bright); }
+
+.log::-webkit-scrollbar { width: 6px; }
+.log::-webkit-scrollbar-track { background: transparent; }
+.log::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 3px; }
+
+/* ============================================================
+   EMPTY STATE
+   ============================================================ */
+.empty-state {
+  text-align: center;
+  padding: 3rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.empty-state h2 {
+  font-family: var(--font-display);
+  font-size: 1.4rem;
+  color: var(--ink-bright);
+}
+
+.empty-state::before {
+  content: "";
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, var(--sonar) 0 6%, transparent 7%),
+    radial-gradient(circle at center, transparent 0 28%, var(--sonar-glow) 29% 31%, transparent 32%),
+    radial-gradient(circle at center, transparent 0 58%, var(--sonar-glow) 59% 61%, transparent 62%);
+  opacity: 0.7;
+  margin-bottom: 0.5rem;
+}
+
+.empty-state p { color: var(--ink-muted); max-width: 42ch; }
+
+.compact-form { padding-bottom: 0.3rem; border-bottom: 1px solid var(--line); }
+
+/* ============================================================
+   RESPONSIVE
+   ============================================================ */
+@media (max-width: 1000px) {
+  .layout { grid-template-columns: 1fr; }
+  .sidebar,
+  .game-col,
+  main.stack { grid-column: auto; }
+  .hero { flex-direction: column; align-items: flex-start; }
+  .boards-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 560px) {
+  #app { padding: 1rem 0.9rem 2rem; }
+  .cell, .axis-cell { width: 28px; height: 28px; font-size: 0.7rem; }
+  .row, .info-grid, .summary-grid { grid-template-columns: 1fr 1fr; }
+}
+
+/* ============================================================
+   SERVER SWITCHER
+   ============================================================ */
+.server-panel select {
+  font-size: 0.82rem;
+}
+
+.server-status.online {
+  color: var(--bg-void);
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.server-status.offline {
+  color: var(--ink-bright);
+  background: var(--hit-soft);
+  border-color: var(--hit);
+}
+
+.server-status.checking {
+  color: var(--bg-void);
+  background: var(--alert);
+  border-color: var(--alert);
 }
