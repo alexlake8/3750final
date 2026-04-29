@@ -7,7 +7,45 @@ const TEST_PASSWORD = process.env.TEST_PASSWORD || 'clemson-test-2026';
 
 const app = express();
 
-app.use(cors({ origin: process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(',') : '*' }));
+const defaultCorsOrigins = [
+  'http://localhost:5173',
+  'http://localhost:3000',
+  'https://alexlake.site',
+  'https://www.alexlake.site',
+  'https://battleshipfinal.xyz',
+  'https://www.battleshipfinal.xyz',
+  'https://portfolio-fpvj.onrender.com',
+  'https://three750final-1.onrender.com',
+];
+
+const configuredCorsOrigins = (process.env.CORS_ORIGIN || '')
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter(Boolean);
+
+const allowedCorsOrigins = new Set([...defaultCorsOrigins, ...configuredCorsOrigins]);
+const allowAnyCorsOrigin = !process.env.CORS_ORIGIN || configuredCorsOrigins.includes('*');
+
+const corsOptions = {
+  origin(origin, callback) {
+    // Non-browser clients such as curl, Postman, and the autograder usually do not send an Origin header.
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (allowAnyCorsOrigin || allowedCorsOrigins.has(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Test-Password'],
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 
 app.use((req, res, next) => {
